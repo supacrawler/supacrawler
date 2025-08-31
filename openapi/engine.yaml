@@ -1,0 +1,516 @@
+openapi: 3.0.3
+info:
+  title: Supacrawler Scraper Engine API
+  version: 0.1.0
+  description: HTTP API for scraping, mapping, crawling, and screenshots
+servers:
+  - url: http://localhost:8081
+    description: Local engine
+tags:
+  - name: health
+  - name: scrape
+  - name: jobs
+  - name: screenshots
+paths:
+  /internal/health:
+    get:
+      tags: [health]
+      summary: Health check
+      responses:
+        '200':
+          description: ok
+          content:
+            text/plain:
+              schema:
+                type: string
+  /v1/scrape:
+    get:
+      tags: [scrape]
+      summary: Scrape a single URL
+      parameters:
+        - in: query
+          name: url
+          required: true
+          schema:
+            type: string
+            format: uri
+        - in: query
+          name: format
+          schema:
+            type: string
+            enum: [markdown, links]
+        - in: query
+          name: depth
+          schema:
+            type: integer
+            minimum: 0
+        - in: query
+          name: max_links
+          schema:
+            type: integer
+            minimum: 0
+        - in: query
+          name: render_js
+          schema:
+            type: boolean
+        - in: query
+          name: include_html
+          schema:
+            type: boolean
+        - in: query
+          name: fresh
+          schema:
+            type: boolean
+      responses:
+        '200':
+          description: Scrape response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScrapeResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '408':
+          $ref: '#/components/responses/RequestTimeout'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/crawl:
+    post:
+      tags: [jobs]
+      summary: Create a crawl job
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CrawlCreateRequest'
+      responses:
+        '200':
+          description: Crawl job created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CrawlCreateResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /v1/crawl/{jobId}:
+    get:
+      tags: [jobs]
+      summary: Get crawl job status/result
+      parameters:
+        - in: path
+          name: jobId
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Crawl job status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CrawlStatusResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/screenshots:
+    post:
+      tags: [screenshots]
+      summary: Create a screenshot job or stream sync file
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScreenshotCreateRequest'
+      responses:
+        '200':
+          description: Screenshot job created or image streamed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScreenshotJobResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+    get:
+      tags: [screenshots]
+      summary: Get screenshot artifact by job id
+      parameters:
+        - in: query
+          name: job_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Screenshot content or URL
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScreenshotGetResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+components:
+  responses:
+    BadRequest:
+      description: Bad request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: Forbidden - Access denied (e.g., robots.txt disallowed)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    RequestTimeout:
+      description: Request timeout
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    UnprocessableEntity:
+      description: Unprocessable entity - Content filtered or invalid
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    TooManyRequests:
+      description: Too many requests - Rate limited
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    InternalError:
+      description: Server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+  schemas:
+    Error:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: false
+        error:
+          type: string
+
+    ScrapeResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        url:
+          type: string
+          format: uri
+        title:
+          type: string
+        content:
+          type: string
+          description: Markdown content or links depending on format
+        html:
+          type: string
+          description: HTML content (only if include_html=true)
+        links:
+          type: array
+          items:
+            type: string
+        discovered:
+          type: integer
+        metadata:
+          $ref: '#/components/schemas/ScrapeMetadata'
+      required: [success, url, metadata]
+
+    ScrapeMetadata:
+      type: object
+      properties:
+        status_code:
+          type: integer
+        depth:
+          type: integer
+        source_url:
+          type: string
+          format: uri
+        title:
+          type: string
+        description:
+          type: string
+        language:
+          type: string
+        canonical:
+          type: string
+        favicon:
+          type: string
+        og_title:
+          type: string
+        og_description:
+          type: string
+        og_image:
+          type: string
+        og_site_name:
+          type: string
+        twitter_title:
+          type: string
+        twitter_description:
+          type: string
+        twitter_image:
+          type: string
+
+    CrawlCreateRequest:
+      type: object
+      properties:
+        url:
+          type: string
+          format: uri
+        format:
+          type: string
+          enum: [markdown, html]
+        depth:
+          type: integer
+        link_limit:
+          type: integer
+        include_subdomains:
+          type: boolean
+        render_js:
+          type: boolean
+        include_html:
+          type: boolean
+      required: [url]
+
+    CrawlCreateResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        job_id:
+          type: string
+      required: [success, job_id]
+
+    CrawlStatusResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        job_id:
+          type: string
+        status:
+          type: string
+          enum: [pending, processing, completed, failed]
+        data:
+          $ref: '#/components/schemas/CrawlJobData'
+        error:
+          type: string
+      required: [success, status]
+
+    CrawlJobData:
+      type: object
+      properties:
+        url:
+          type: string
+        crawl_data:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/PageContent'
+        error_data:
+          type: object
+          additionalProperties:
+            type: string
+        statistics:
+          $ref: '#/components/schemas/CrawlStatistics'
+        render_js:
+          type: boolean
+
+    PageContent:
+      type: object
+      properties:
+        markdown:
+          type: string
+        html:
+          type: string
+        metadata:
+          $ref: '#/components/schemas/PageMetadata'
+      required: [markdown, metadata]
+
+    PageMetadata:
+      type: object
+      properties:
+        title:
+          type: string
+        status_code:
+          type: integer
+
+    CrawlStatistics:
+      type: object
+      properties:
+        total_pages:
+          type: integer
+        successful_pages:
+          type: integer
+        failed_pages:
+          type: integer
+
+    ScreenshotCreateRequest:
+      type: object
+      properties:
+        url:
+          type: string
+          format: uri
+        full_page:
+          type: boolean
+        format:
+          type: string
+          enum: [png, jpeg, jpg, webp]
+        width:
+          type: integer
+        height:
+          type: integer
+        quality:
+          type: integer
+          minimum: 1
+          maximum: 100
+        device:
+          type: string
+          enum: [desktop, mobile, tablet, custom]
+        wait_until:
+          type: string
+          enum: [load, domcontentloaded, networkidle]
+        timeout:
+          type: integer
+          minimum: 5
+          maximum: 120
+        dark_mode:
+          type: boolean
+        delay:
+          type: integer
+          minimum: 0
+          maximum: 30
+        wait_for_selector:
+          type: string
+        click_selector:
+          type: string
+        hide_selectors:
+          type: array
+          items:
+            type: string
+        block_ads:
+          type: boolean
+        block_cookies:
+          type: boolean
+        block_chats:
+          type: boolean
+        block_trackers:
+          type: boolean
+        block_resources:
+          type: array
+          items:
+            type: string
+            enum: [image, stylesheet, script, font]
+        user_agent:
+          type: string
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+        cookies:
+          type: array
+          items:
+            type: object
+        reduced_motion:
+          type: boolean
+        high_contrast:
+          type: boolean
+        disable_js:
+          type: boolean
+        print_mode:
+          type: boolean
+        ignore_https:
+          type: boolean
+        device_scale:
+          type: number
+        is_mobile:
+          type: boolean
+        has_touch:
+          type: boolean
+        is_landscape:
+          type: boolean
+        stream:
+          type: boolean
+      required: [url]
+
+    ScreenshotJobResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        job_id:
+          type: string
+        type:
+          type: string
+          enum: [screenshot]
+        status:
+          type: string
+          enum: [processing, completed, failed]
+        url:
+          type: string
+        metadata:
+          $ref: '#/components/schemas/ScreenshotMetadata'
+      required: [success, job_id]
+
+    ScreenshotGetResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        job_id:
+          type: string
+        url:
+          type: string
+          description: Source URL of the page
+        screenshot:
+          type: string
+          description: Signed or public URL to the image
+        status:
+          type: string
+          enum: [processing, completed, failed]
+        metadata:
+          $ref: '#/components/schemas/ScreenshotMetadata'
+      required: [success]
+
+    ScreenshotMetadata:
+      type: object
+      properties:
+        width:
+          type: integer
+        height:
+          type: integer
+        format:
+          type: string
+        quality:
+          type: integer
+        file_size:
+          type: integer
+        load_time:
+          type: integer
+        device:
+          type: string
+        device_scale:
+          type: number
+
+

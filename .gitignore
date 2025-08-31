@@ -1,0 +1,16 @@
+/.secrets
+tmp
+data
+
+logs.log
+.DS_Store
+
+.*store
+
+/logs
+/packages
+
+.env
+.env
+.env.local
+.venv
