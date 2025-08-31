@@ -1,5 +1,6 @@
 # GoReleaser configuration for Supacrawler
 # Visit https://goreleaser.com for documentation
+version: 2
 
 before:
   hooks:
@@ -25,18 +26,20 @@ builds:
       - -X main.date={{.Date}}
 
 archives:
-  - format: tar.gz
-    name_template: >-
+  - name_template: >-
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}
+    formats:
+      - tar.gz
     format_overrides:
       - goos: windows
-        format: zip
+        formats:
+          - zip
 
 checksum:
   name_template: 'checksums.txt'
 
 snapshot:
-  name_template: "{{ incpatch .Version }}-next"
+  version_template: "{{ incpatch .Version }}-next"
 
 changelog:
   sort: asc
@@ -51,7 +54,7 @@ changelog:
 # Homebrew formula generation
 brews:
   - name: supacrawler
-    tap:
+    repository:
       owner: supacrawler
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
@@ -60,7 +63,6 @@ brews:
       email: bot@goreleaser.com
     homepage: "https://github.com/supacrawler/supacrawler"
     description: "Fast, reliable web scraper and crawler engine"
-    folder: Formula
     install: |
       bin.install "supacrawler"
     test: |
@@ -71,7 +73,7 @@ dockers:
   - image_templates:
       - "ghcr.io/supacrawler/supacrawler:{{ .Version }}"
       - "ghcr.io/supacrawler/supacrawler:latest"
-    dockerfile: Dockerfile
+    dockerfile: Dockerfile.goreleaser
     build_flag_templates:
       - "--pull"
       - "--label=org.opencontainers.image.created={{.Date}}"
@@ -80,5 +82,3 @@ dockers:
       - "--label=org.opencontainers.image.version={{.Version}}"
     extra_files:
       - scripts/docker-entrypoint.sh
-      - go.mod
-      - go.sum

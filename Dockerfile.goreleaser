@@ -1,0 +1,22 @@
+# GoReleaser Dockerfile - uses pre-built binary
+FROM debian:bookworm-slim
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  ca-certificates tzdata libnss3 libglib2.0-0 libx11-6 libxext6 libxrender1 libxtst6 \
+  libcups2 libfontconfig1 libasound2 curl && rm -rf /var/lib/apt/lists/*
+
+# Copy the pre-built binary from GoReleaser
+COPY supacrawler /bin/supacrawler
+
+# Copy the entrypoint script
+COPY scripts/docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
+
+# Install Playwright (this would ideally be in a base image in production)
+# For now, we'll skip it to avoid the complexity in the GoReleaser build
+# The manual Dockerfile can still use it for local development
+
+EXPOSE 8081
+ENTRYPOINT ["/docker-entrypoint.sh"]
+CMD ["/bin/supacrawler"]
