@@ -49,24 +49,6 @@ changelog:
       - 'Merge pull request'
       - 'Merge branch'
 
-# Homebrew formula generation
-brews:
-  - name: supacrawler
-    tap:
-      owner: supacrawler
-      name: homebrew-tap
-      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
-    commit_author:
-      name: goreleaserbot
-      email: bot@goreleaser.com
-    homepage: "https://github.com/supacrawler/supacrawler"
-    description: "Fast, reliable web scraper and crawler engine"
-    folder: Formula
-    install: |
-      bin.install "supacrawler"
-    test: |
-      system "#{bin}/supacrawler", "--version"
-
 # Docker images
 dockers:
   - image_templates:

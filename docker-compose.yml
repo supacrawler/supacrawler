@@ -1,0 +1,22 @@
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
+  supacrawler:
+    image: ghcr.io/supacrawler/supacrawler:latest
+    ports:
+      - "8081:8081"
+    environment:
+      - REDIS_ADDR=redis:6379
+      - HTTP_ADDR=:8081
+      - APP_ENV=development
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+# Optional: Add volume for data persistence
+#   volumes:
+#     - ./data:/app/data

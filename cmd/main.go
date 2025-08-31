@@ -72,7 +72,7 @@ func main() {
 	}()
 
 	// HTTP server
-	app := fiber.New(fiber.Config{AppName: "Scraper Engine"})
+	app := fiber.New(fiber.Config{AppName: "Supacrawler Engine"})
 	// Serve saved artifacts (e.g., screenshots) from DATA_DIR under /files
 	app.Static("/files", cfg.DataDir)
 

@@ -6,34 +6,57 @@ A standalone HTTP service for scraping, mapping, crawling, and screenshots. It r
 
 ## Quick Start
 
-### Install via Homebrew (Recommended)
+### Docker (Recommended)
 
+**Option A: Docker Compose**
 ```bash
-brew tap supacrawler/tap
-brew install supacrawler
+curl -O https://raw.githubusercontent.com/supacrawler/supacrawler/main/docker-compose.yml
+docker compose up
 ```
 
-### Download Binary
-
-Download the latest binary from the [releases page](https://github.com/supacrawler/supacrawler/releases).
-
-### Docker
-
+**Option B: Manual Docker**
 ```bash
-docker run --rm -p 8081:8081 ghcr.io/supacrawler/supacrawler:latest
+docker run -d --name redis -p 6379:6379 redis:7-alpine
+docker run --rm -p 8081:8081 \
+  -e REDIS_ADDR=host.docker.internal:6379 \
+  ghcr.io/supacrawler/supacrawler:latest
 ```
+
+### Binary Download
+
+For advanced users who prefer native binaries:
+
+1. **Download** from [releases page](https://github.com/supacrawler/supacrawler/releases)
+2. **Install dependencies:** Redis + Node.js + Playwright v1.49.1
+3. **Run:** `./supacrawler --redis-addr=127.0.0.1:6379`
+
+**Note:** Docker is recommended for easier setup.
+
+### Requirements
+
+**Dependencies:**
+- **Redis** - for job queuing and background processing
+- **Playwright** - for JavaScript rendering and screenshots
 
 ## Usage
 
 ### Start the Server
 
 ```bash
-# With Redis (recommended)
-redis-server &
-supacrawler --redis-addr=127.0.0.1:6379
+# 1. Make sure Redis is running
+brew services start redis
+# OR: docker run -d --name redis -p 6379:6379 redis:7-alpine
 
-# Standalone mode
-supacrawler
+# 2. Start Supacrawler
+supacrawler --redis-addr=127.0.0.1:6379
+```
+
+**What you'll see:**
+```
+🕷️ Supacrawler Engine
+├─ Server: http://127.0.0.1:8081
+├─ Health: http://127.0.0.1:8081/v1/health  
+└─ API Docs: http://127.0.0.1:8081/docs
 ```
 
 ### API Examples
@@ -50,6 +73,25 @@ curl -X POST http://localhost:8081/v1/screenshots \
   -H 'Content-Type: application/json' \
   -d '{"url":"https://example.com","full_page":true}'
 ```
+
+### 📸 JavaScript Rendering & Screenshots
+
+**This is supacrawler's core functionality** - modern web scraping requires JS rendering.
+
+**One-line install handles this automatically.** For manual installs:
+
+```bash
+# Install Node.js and Playwright
+npm install -g playwright
+playwright install chromium --with-deps
+```
+
+**Without Playwright:** 
+- ❌ `render_js=true` fails with "please install the driver" 
+- ❌ Screenshots fail completely
+- ❌ SPAs return empty content
+
+**With Docker:** Everything works out of the box (Playwright included).
 
 ### Configuration
 
