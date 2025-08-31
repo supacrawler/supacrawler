@@ -1,6 +1,6 @@
 # GoReleaser configuration for Supacrawler
 # Visit https://goreleaser.com for documentation
-version: 2
+version: 1
 
 before:
   hooks:
@@ -26,20 +26,18 @@ builds:
       - -X main.date={{.Date}}
 
 archives:
-  - name_template: >-
+  - format: tar.gz
+    name_template: >-
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}
-    formats:
-      - tar.gz
     format_overrides:
       - goos: windows
-        formats:
-          - zip
+        format: zip
 
 checksum:
   name_template: 'checksums.txt'
 
 snapshot:
-  version_template: "{{ incpatch .Version }}-next"
+  name_template: "{{ incpatch .Version }}-next"
 
 changelog:
   sort: asc
@@ -54,7 +52,7 @@ changelog:
 # Homebrew formula generation
 brews:
   - name: supacrawler
-    repository:
+    tap:
       owner: supacrawler
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
@@ -63,6 +61,7 @@ brews:
       email: bot@goreleaser.com
     homepage: "https://github.com/supacrawler/supacrawler"
     description: "Fast, reliable web scraper and crawler engine"
+    folder: Formula
     install: |
       bin.install "supacrawler"
     test: |
