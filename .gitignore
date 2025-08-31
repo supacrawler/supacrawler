@@ -15,3 +15,5 @@ logs.log
 .env
 .env.local
 .venv
+
+dump.rdb
