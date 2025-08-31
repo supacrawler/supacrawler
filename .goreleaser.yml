@@ -68,12 +68,12 @@ brews:
     test: |
       system "#{bin}/supacrawler", "--version"
 
-# Docker images (optional)
+# Docker images
 dockers:
   - image_templates:
       - "ghcr.io/supacrawler/supacrawler:{{ .Version }}"
       - "ghcr.io/supacrawler/supacrawler:latest"
-    dockerfile: Dockerfile.goreleaser
+    dockerfile: Dockerfile
     build_flag_templates:
       - "--pull"
       - "--label=org.opencontainers.image.created={{.Date}}"
@@ -82,3 +82,7 @@ dockers:
       - "--label=org.opencontainers.image.version={{.Version}}"
     extra_files:
       - scripts/docker-entrypoint.sh
+      - go.mod
+      - go.sum
+      - cmd/
+      - internal/
