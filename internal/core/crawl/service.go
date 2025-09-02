@@ -12,6 +12,7 @@ import (
 	"scraper/internal/logger"
 	"scraper/internal/platform/engineapi"
 	tasks "scraper/internal/platform/tasks"
+	"scraper/internal/utils/markdown"
 
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
@@ -112,8 +113,14 @@ func (s *CrawlService) streamCrawl(ctx context.Context, r engineapi.CrawlCreateR
 		includeSubs = *r.IncludeSubdomains
 	}
 
+	// Check if fresh data is requested
+	fresh := false
+	if r.Fresh != nil {
+		fresh = *r.Fresh
+	}
+
 	// Scrape starting URL first
-	if data, _, err := s.scrape.ScrapeWithCache(ctx, r.Url, includeHTML, renderJs); err != nil {
+	if data, err := s.scrapeWithFreshOption(ctx, r.Url, includeHTML, renderJs, fresh); err != nil {
 		s.log.LogWarnf("start url scrape failed %s: %v", r.Url, err)
 		errs[r.Url] = err.Error()
 	} else if data != nil {
@@ -125,11 +132,17 @@ func (s *CrawlService) streamCrawl(ctx context.Context, r engineapi.CrawlCreateR
 		if data.Title != nil {
 			title = *data.Title
 		}
-		var sc *int
-		if data.Metadata.StatusCode != nil {
-			sc = data.Metadata.StatusCode
+		// Clean markdown content to ensure JSON compatibility
+		cleanContent := cleanContentForJSON(content)
+		pageContent := engineapi.PageContent{
+			Markdown: cleanContent,
+			Metadata: buildPageMetadataFromScrapeMetadata(data.Metadata, title),
 		}
-		out[r.Url] = engineapi.PageContent{Markdown: content, Metadata: engineapi.PageMetadata{Title: &title, StatusCode: sc}}
+		// Include HTML if requested
+		if includeHTML && data.Html != nil {
+			pageContent.Html = data.Html
+		}
+		out[r.Url] = pageContent
 		mu.Lock()
 		processed[r.Url] = struct{}{}
 		mu.Unlock()
@@ -176,7 +189,7 @@ func (s *CrawlService) streamCrawl(ctx context.Context, r engineapi.CrawlCreateR
 				}
 				continue
 			}
-			res, _, err := s.scrape.ScrapeWithCache(ctx, u, includeHTML, renderJs)
+			res, err := s.scrapeWithFreshOption(ctx, u, includeHTML, renderJs, fresh)
 			if err != nil {
 				mu.Lock()
 				errs[u] = err.Error()
@@ -190,12 +203,18 @@ func (s *CrawlService) streamCrawl(ctx context.Context, r engineapi.CrawlCreateR
 				if res.Title != nil {
 					title = *res.Title
 				}
-				var sc *int
-				if res.Metadata.StatusCode != nil {
-					sc = res.Metadata.StatusCode
-				}
 				mu.Lock()
-				out[u] = engineapi.PageContent{Markdown: content, Metadata: engineapi.PageMetadata{Title: &title, StatusCode: sc}}
+				// Clean markdown content to ensure JSON compatibility
+				cleanContent := cleanContentForJSON(content)
+				pageContent := engineapi.PageContent{
+					Markdown: cleanContent,
+					Metadata: buildPageMetadataFromScrapeMetadata(res.Metadata, title),
+				}
+				// Include HTML if requested
+				if includeHTML && res.Html != nil {
+					pageContent.Html = res.Html
+				}
+				out[u] = pageContent
 				mu.Unlock()
 			}
 			// early stop if reached limit
@@ -225,6 +244,11 @@ func (s *CrawlService) streamCrawl(ctx context.Context, r engineapi.CrawlCreateR
 }
 
 func (s *CrawlService) crawl(ctx context.Context, r engineapi.CrawlCreateRequest) (*map[string]engineapi.PageContent, *map[string]string) {
+	// Check if fresh data is requested
+	fresh := false
+	if r.Fresh != nil {
+		fresh = *r.Fresh
+	}
 	out := make(map[string]engineapi.PageContent)
 	errs := make(map[string]string)
 	// map links
@@ -275,7 +299,7 @@ func (s *CrawlService) crawl(ctx context.Context, r engineapi.CrawlCreateRequest
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			result, e := s.scrapeWithCache(ctx, u, includeHTML, renderJs)
+			result, e := s.scrapeWithFreshOption(ctx, u, includeHTML, renderJs, fresh)
 			if e != nil {
 				errs[u] = e.Error()
 				return
@@ -289,14 +313,18 @@ func (s *CrawlService) crawl(ctx context.Context, r engineapi.CrawlCreateRequest
 			if result.Title != nil {
 				title = *result.Title
 			}
-			var statusCodePtr *int
-			if result.Metadata.StatusCode != nil {
-				statusCodePtr = result.Metadata.StatusCode
-			}
 
 			// Build engine page content
-			md := content // Markdown or HTML depending on request; already chosen upstream
-			pc := engineapi.PageContent{Markdown: md, Metadata: engineapi.PageMetadata{Title: &title, StatusCode: statusCodePtr}}
+			// Clean markdown content to ensure JSON compatibility
+			cleanContent := cleanContentForJSON(content)
+			pc := engineapi.PageContent{
+				Markdown: cleanContent,
+				Metadata: buildPageMetadataFromScrapeMetadata(result.Metadata, title),
+			}
+			// Include HTML if requested
+			if includeHTML && result.Html != nil {
+				pc.Html = result.Html
+			}
 			out[u] = pc
 		}()
 	}
@@ -309,8 +337,25 @@ func (s *CrawlService) scrapeWithCache(ctx context.Context, url string, includeH
 	if includeHTML {
 		format = engineapi.GetV1ScrapeParamsFormat("html")
 	}
-	params := engineapi.GetV1ScrapeParams{Url: url, Format: &format, RenderJs: &renderJs}
+	params := engineapi.GetV1ScrapeParams{Url: url, Format: &format, RenderJs: &renderJs, IncludeHtml: &includeHTML}
 	return s.scrape.ScrapeURL(ctx, params)
+}
+
+// scrapeWithFreshOption decides whether to use cache or fresh scraping based on the fresh parameter
+func (s *CrawlService) scrapeWithFreshOption(ctx context.Context, url string, includeHTML, renderJs, fresh bool) (*engineapi.ScrapeResponse, error) {
+	if fresh {
+		// Bypass cache and scrape fresh
+		format := engineapi.GetV1ScrapeParamsFormat("markdown")
+		if includeHTML {
+			format = engineapi.GetV1ScrapeParamsFormat("html")
+		}
+		params := engineapi.GetV1ScrapeParams{Url: url, Format: &format, RenderJs: &renderJs, Fresh: &fresh, IncludeHtml: &includeHTML}
+		return s.scrape.ScrapeURL(ctx, params)
+	} else {
+		// Use cache if available
+		result, _, err := s.scrape.ScrapeWithCache(ctx, url, includeHTML, renderJs)
+		return result, err
+	}
 }
 
 func stats(res *map[string]engineapi.PageContent, errs *map[string]string) *engineapi.CrawlStatistics {
@@ -326,4 +371,67 @@ func derefInt(v *int) int {
 		return 0
 	}
 	return *v
+}
+
+// cleanContentForJSON ensures markdown content is safe for JSON serialization
+func cleanContentForJSON(content string) string {
+	if content == "" {
+		return ""
+	}
+	// Apply the markdown cleaning which includes JSON escape fixes
+	return markdown.CleanMarkdownBoilerplate(content)
+}
+
+// buildPageMetadataFromScrapeMetadata converts rich ScrapeMetadata to PageMetadata with all fields
+func buildPageMetadataFromScrapeMetadata(scrapeMetadata engineapi.ScrapeMetadata, title string) engineapi.PageMetadata {
+	meta := engineapi.PageMetadata{
+		StatusCode: scrapeMetadata.StatusCode,
+	}
+
+	// Use title from parameter if available, otherwise from metadata
+	if title != "" {
+		meta.Title = &title
+	} else if scrapeMetadata.Title != nil {
+		meta.Title = scrapeMetadata.Title
+	}
+
+	// Map all the rich metadata fields from ScrapeMetadata to PageMetadata
+	if scrapeMetadata.Description != nil {
+		meta.Description = scrapeMetadata.Description
+	}
+	if scrapeMetadata.Language != nil {
+		meta.Language = scrapeMetadata.Language
+	}
+	if scrapeMetadata.Canonical != nil {
+		meta.Canonical = scrapeMetadata.Canonical
+	}
+	if scrapeMetadata.Favicon != nil {
+		meta.Favicon = scrapeMetadata.Favicon
+	}
+	if scrapeMetadata.OgTitle != nil {
+		meta.OgTitle = scrapeMetadata.OgTitle
+	}
+	if scrapeMetadata.OgDescription != nil {
+		meta.OgDescription = scrapeMetadata.OgDescription
+	}
+	if scrapeMetadata.OgImage != nil {
+		meta.OgImage = scrapeMetadata.OgImage
+	}
+	if scrapeMetadata.OgSiteName != nil {
+		meta.OgSiteName = scrapeMetadata.OgSiteName
+	}
+	if scrapeMetadata.TwitterTitle != nil {
+		meta.TwitterTitle = scrapeMetadata.TwitterTitle
+	}
+	if scrapeMetadata.TwitterDescription != nil {
+		meta.TwitterDescription = scrapeMetadata.TwitterDescription
+	}
+	if scrapeMetadata.TwitterImage != nil {
+		meta.TwitterImage = scrapeMetadata.TwitterImage
+	}
+	if scrapeMetadata.SourceUrl != nil {
+		meta.SourceUrl = scrapeMetadata.SourceUrl
+	}
+
+	return meta
 }

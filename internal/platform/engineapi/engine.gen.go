@@ -88,13 +88,16 @@ const (
 
 // CrawlCreateRequest defines model for CrawlCreateRequest.
 type CrawlCreateRequest struct {
-	Depth             *int                      `json:"depth,omitempty"`
-	Format            *CrawlCreateRequestFormat `json:"format,omitempty"`
-	IncludeHtml       *bool                     `json:"include_html,omitempty"`
-	IncludeSubdomains *bool                     `json:"include_subdomains,omitempty"`
-	LinkLimit         *int                      `json:"link_limit,omitempty"`
-	RenderJs          *bool                     `json:"render_js,omitempty"`
-	Url               string                    `json:"url"`
+	Depth  *int                      `json:"depth,omitempty"`
+	Format *CrawlCreateRequestFormat `json:"format,omitempty"`
+
+	// Fresh Bypass cache and fetch fresh content
+	Fresh             *bool  `json:"fresh,omitempty"`
+	IncludeHtml       *bool  `json:"include_html,omitempty"`
+	IncludeSubdomains *bool  `json:"include_subdomains,omitempty"`
+	LinkLimit         *int   `json:"link_limit,omitempty"`
+	RenderJs          *bool  `json:"render_js,omitempty"`
+	Url               string `json:"url"`
 }
 
 // CrawlCreateRequestFormat defines model for CrawlCreateRequest.Format.
@@ -142,15 +145,27 @@ type Error struct {
 
 // PageContent defines model for PageContent.
 type PageContent struct {
-	Html     *string      `json:"html,omitempty"`
 	Markdown string       `json:"markdown"`
+	Html     *string      `json:"html,omitempty"`
 	Metadata PageMetadata `json:"metadata"`
 }
 
 // PageMetadata defines model for PageMetadata.
 type PageMetadata struct {
-	StatusCode *int    `json:"status_code,omitempty"`
-	Title      *string `json:"title,omitempty"`
+	Canonical          *string `json:"canonical,omitempty"`
+	Description        *string `json:"description,omitempty"`
+	Favicon            *string `json:"favicon,omitempty"`
+	Language           *string `json:"language,omitempty"`
+	OgDescription      *string `json:"og_description,omitempty"`
+	OgImage            *string `json:"og_image,omitempty"`
+	OgSiteName         *string `json:"og_site_name,omitempty"`
+	OgTitle            *string `json:"og_title,omitempty"`
+	SourceUrl          *string `json:"source_url,omitempty"`
+	StatusCode         *int    `json:"status_code,omitempty"`
+	Title              *string `json:"title,omitempty"`
+	TwitterDescription *string `json:"twitter_description,omitempty"`
+	TwitterImage       *string `json:"twitter_image,omitempty"`
+	TwitterTitle       *string `json:"twitter_title,omitempty"`
 }
 
 // ScrapeMetadata defines model for ScrapeMetadata.

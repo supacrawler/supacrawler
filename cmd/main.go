@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"log"
 	"os"
 	"os/signal"
@@ -72,7 +74,18 @@ func main() {
 	}()
 
 	// HTTP server
-	app := fiber.New(fiber.Config{AppName: "Supacrawler Engine"})
+	app := fiber.New(fiber.Config{
+		AppName: "Supacrawler Engine",
+		JSONEncoder: func(v interface{}) ([]byte, error) {
+			var buf bytes.Buffer
+			encoder := json.NewEncoder(&buf)
+			encoder.SetEscapeHTML(false)
+			if err := encoder.Encode(v); err != nil {
+				return nil, err
+			}
+			return buf.Bytes(), nil
+		},
+	})
 	// Serve saved artifacts (e.g., screenshots) from DATA_DIR under /files
 	app.Static("/files", cfg.DataDir)
 

@@ -156,7 +156,10 @@ func fixInvalidEscapes(text string) string {
 	text = strings.ReplaceAll(text, "\\\\", "\\")
 
 	// Then fix control characters that need to be escaped
-	return fixControlCharacters(text)
+	text = fixControlCharacters(text)
+
+	// Apply JSON-specific escape fixes
+	return fixJSONEscapes(text)
 }
 
 // fixControlCharacters replaces invalid control characters in JSON strings
@@ -191,6 +194,40 @@ func fixControlCharacters(text string) string {
 	// Remove other problematic characters
 	text = strings.ReplaceAll(text, "\u0000", "") // null character (alternative)
 	text = strings.ReplaceAll(text, "\uFFFF", "") // non-character
+
+	return text
+}
+
+// fixJSONEscapes handles JSON-specific escape sequences
+func fixJSONEscapes(text string) string {
+	// Fix common JSON escape issues by replacing invalid escape sequences
+
+	// Fix \< and \> which are invalid JSON escapes
+	text = strings.ReplaceAll(text, "\\<", "<")
+	text = strings.ReplaceAll(text, "\\>", ">")
+
+	// Fix other common invalid escapes
+	text = strings.ReplaceAll(text, "\\var", "var")
+	text = strings.ReplaceAll(text, "\\'", "'")
+
+	// Normalize devsite unicode-escaped angle brackets (u003c/u003e)
+	text = strings.ReplaceAll(text, "u003c", "<")
+	text = strings.ReplaceAll(text, "u003e", ">")
+
+	// Normalize devsite-specific code fences to standard markdown
+	text = strings.ReplaceAll(text, "```devsite-terminal", "```bash")
+
+	// Fix shell-escaped apostrophes that leak into content (What'\\''s -> What's)
+	text = strings.ReplaceAll(text, "'\\''", "'")
+	// Collapse any doubled/tripled single quotes that remain
+	text = strings.ReplaceAll(text, "'''", "'")
+	text = strings.ReplaceAll(text, "''", "'")
+
+	// Fix HTML entities that might cause issues
+	text = strings.ReplaceAll(text, "&lt;", "<")
+	text = strings.ReplaceAll(text, "&gt;", ">")
+	text = strings.ReplaceAll(text, "&amp;", "&")
+	text = strings.ReplaceAll(text, "&quot;", `"`)
 
 	return text
 }
