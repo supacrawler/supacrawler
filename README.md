@@ -4,6 +4,8 @@ Supacrawler's ultralight engine for scraping and crawling the web. Written in Go
 
 A standalone HTTP service for scraping, mapping, crawling, and screenshots. It runs a web API with a background worker (Redis + Asynq). Routes match the existing Supacrawler SDKs under `/v1`.
 
+**Why open source?** We believe powerful web scraping technology should be accessible to everyone. Whether you're a solo developer, startup, or enterprise - you shouldn't have to choose between quality and affordability. [Read our open source announcement →](https://supacrawler.com/blog/supacrawler-is-now-open-source)
+
 ## Quick Start
 
 ### Docker (Recommended)
@@ -30,7 +32,7 @@ For advanced users who prefer native binaries:
 2. **Install dependencies:** Redis + Node.js + Playwright v1.49.1
 3. **Run:** `./supacrawler --redis-addr=127.0.0.1:6379`
 
-**Note:** Docker is recommended for easier setup.
+**Note:** Docker is recommended for easier setup. [See complete local development guide →](https://docs.supacrawler.com/local-development)
 
 ### Requirements
 
@@ -93,6 +95,8 @@ playwright install chromium --with-deps
 
 **With Docker:** Everything works out of the box (Playwright included).
 
+[Learn more about JavaScript rendering →](https://supacrawler.com/blog/complete-guide-scraping-javascript-websites-2025)
+
 ### Configuration
 
 You can configure Supacrawler using environment variables or a `.env` file. Copy `.env.example` to `.env` and modify as needed.
@@ -111,6 +115,8 @@ You can configure Supacrawler using environment variables or a `.env` file. Copy
 - `SUPABASE_STORAGE_BUCKET` - Storage bucket name (default: `screenshots`)
 
 ## Development & Contributing
+
+**New to SupaCrawler?** [Read our comprehensive development guide →](https://docs.supacrawler.com/local-development) or [browse tutorials →](https://supacrawler.com/blog)
 
 ### Native Go Development
 
@@ -137,7 +143,7 @@ brew services start redis
 # OR: docker run -d --name redis -p 6379:6379 redis:7-alpine
 
 # Run the server
- how do we do that ? go mod tidy
+go mod tidy
 go run ./cmd/main.go
 ```
 
@@ -190,6 +196,8 @@ docker run --rm \
 ## API Reference
 
 Base URL: `http://localhost:8081/v1`
+
+**Complete API documentation:** [docs.supacrawler.com](https://docs.supacrawler.com)
 
 ### Health Check
 ```bash
@@ -290,6 +298,12 @@ result = client.scrape({
 - [JavaScript/TypeScript SDK](https://github.com/supacrawler/supacrawler-js)
 - [Python SDK](https://github.com/supacrawler/supacrawler-py)
 
+**Tutorials & Guides:**
+- [Local development setup](https://docs.supacrawler.com/local-development)
+- [Python web scraping tutorial](https://supacrawler.com/blog/python-web-scraping-tutorial-for-beginners-2025)
+- [JavaScript scraping guide](https://supacrawler.com/blog/complete-guide-scraping-javascript-websites-2025)
+- [Best practices](https://supacrawler.com/blog/web-scraping-best-practices-avoid-getting-blocked-2025)
+
 ## Environment Variables
 
 - `HTTP_ADDR` - Server address (default: `:8081`)
@@ -308,6 +322,12 @@ We welcome contributions! Please see our development setup above to get started.
 2. Create a feature branch: `git checkout -b feature-name`
 3. Make your changes and test locally
 4. Submit a pull request
+
+**Community Resources:**
+- [Contributing guidelines](https://github.com/supacrawler/supacrawler/blob/main/CONTRIBUTING.md)
+- [Development blog posts](https://supacrawler.com/blog) with technical deep dives
+- [Issue tracker](https://github.com/supacrawler/supacrawler/issues) for bugs and features
+- [Discussions](https://github.com/supacrawler/supacrawler/discussions) for questions and ideas
 
 ## License
 
