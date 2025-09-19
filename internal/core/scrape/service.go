@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"scraper/internal/core/scrape/robots"
@@ -42,11 +43,10 @@ func (s *Service) ScrapeWithCache(ctx context.Context, url string, includeHTML, 
 
 	var res *engineapi.ScrapeResponse
 	var err error
-	scrapeFormat := engineapi.GetV1ScrapeParamsFormat("markdown")
 	if renderJs {
-		res, err = s.scrapeWithPlaywright(url, includeHTML, scrapeFormat)
+		res, err = s.scrapeWithPlaywright(params)
 	} else {
-		res, err = s.scrapeSimpleHTTP(url, includeHTML, scrapeFormat)
+		res, err = s.scrapeSimpleHTTP(params)
 	}
 	if err != nil {
 		return nil, false, err
@@ -60,9 +60,9 @@ func (s *Service) ScrapeWithCache(ctx context.Context, url string, includeHTML, 
 	return res, false, nil
 }
 
-// ScrapeURL implements synchronous scrape with caching, robots checks, retry logic, and optional JS rendering
+// ScrapeURL implements synchronous scrape with caching, robots checks, and scraping
 func (s *Service) ScrapeURL(ctx context.Context, params engineapi.GetV1ScrapeParams) (*engineapi.ScrapeResponse, error) {
-	s.log.LogDebugf("scrape start url=%s render_js=%v full params=%+v", params.Url, boolVal(params.RenderJs), params)
+	s.log.LogDebugf("scrape start url=%s render_js=%v", params.Url, boolVal(params.RenderJs))
 	fresh := false
 	if params.Fresh != nil {
 		fresh = *params.Fresh
@@ -77,67 +77,73 @@ func (s *Service) ScrapeURL(ctx context.Context, params engineapi.GetV1ScrapePar
 		s.log.LogDebugf("cache miss url=%s", params.Url)
 	}
 
-	renderJs := false
-	if params.RenderJs != nil {
-		renderJs = *params.RenderJs
-	}
-	format := engineapi.GetV1ScrapeParamsFormat("markdown")
-	if params.Format != nil {
-		format = *params.Format
-	}
-
-	// Get include_html parameter
-	includeHTML := false
-	if params.IncludeHtml != nil {
-		includeHTML = *params.IncludeHtml
-	}
-
 	// Respect robots.txt
 	if !s.robots.IsAllowed(params.Url, "SupacrawlerBot") {
 		s.log.LogWarnf("robots disallow url=%s", params.Url)
 		return nil, fmt.Errorf("disallowed by robots.txt")
 	}
 
-	// Retry logic for transient failures
+	// Default to headless browser (renderJs) unless explicitly disabled
+	usePlaywright := true
+	if params.RenderJs != nil {
+		usePlaywright = *params.RenderJs
+	}
+
 	var result *engineapi.ScrapeResponse
 	var err error
-	maxRetries := 3
-	for attempt := 0; attempt < maxRetries; attempt++ {
-		if attempt > 0 {
-			// simple backoff: 1s, 2s, 4s
-			d := time.Duration(1<<(attempt-1)) * time.Second
-			s.log.LogDebugf("retry attempt=%d sleep=%s url=%s", attempt, d, params.Url)
-			time.Sleep(d)
-		}
 
-		if renderJs {
-			result, err = s.scrapeWithPlaywright(params.Url, includeHTML, format)
-		} else {
-			result, err = s.scrapeSimpleHTTP(params.Url, includeHTML, format)
-		}
-
-		if err != nil && s.isRetryableScrapingError(err) && attempt < maxRetries-1 {
-			s.log.LogWarnf("retryable error url=%s attempt=%d err=%v", params.Url, attempt+1, err)
-			continue
-		}
-		break
+	// Simple scrape - no retry logic
+	if usePlaywright {
+		result, err = s.scrapeWithPlaywright(params)
+	} else {
+		result, err = s.scrapeSimpleHTTP(params)
 	}
 
 	if err != nil {
 		s.log.LogErrorf("scrape failed url=%s err=%v", params.Url, err)
-		return nil, fmt.Errorf("failed to scrape URL after %d attempts: %w", maxRetries, err)
+		return nil, err
 	}
 
-	// Cache write (best-effort)
+	// Success! Cache and return
 	s.cache(ctx, params, result)
-	s.log.LogSuccessf("scrape ok url=%s status=%d", params.Url, intVal(result.Metadata.StatusCode))
+	s.log.LogSuccessf("scrape ok url=%s status=%d method=%s",
+		params.Url, intVal(result.Metadata.StatusCode),
+		map[bool]string{true: "playwright", false: "http"}[usePlaywright])
 	return result, nil
 }
 
-func (s *Service) scrapeSimpleHTTP(url string, includeHTML bool, format engineapi.GetV1ScrapeParamsFormat) (*engineapi.ScrapeResponse, error) {
-	req, err := s.createHTTPRequest(url)
+// scrapeSimpleHTTP provides basic HTTP scraping using parameters from backend
+func (s *Service) scrapeSimpleHTTP(params engineapi.GetV1ScrapeParams) (*engineapi.ScrapeResponse, error) {
+	// Use parameters passed from backend
+	req, err := http.NewRequest("GET", params.Url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("fetch: %w", err)
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+
+	// Use user agent from backend or default
+	userAgent := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+	if params.UserAgent != nil && *params.UserAgent != "" {
+		userAgent = *params.UserAgent
+		s.log.LogDebugf("Using user agent from backend: %s", userAgent)
+	}
+
+	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
+	req.Header.Set("DNT", "1")
+	req.Header.Set("Connection", "keep-alive")
+	req.Header.Set("Upgrade-Insecure-Requests", "1")
+
+	// Log proxy settings (actual proxy setup would be handled differently)
+	if params.ProxyMode != nil && *params.ProxyMode != "off" {
+		s.log.LogDebugf("Proxy mode '%s' requested for URL: %s", *params.ProxyMode, params.Url)
+		if params.ProxyRegion != nil {
+			s.log.LogDebugf("Proxy region: %s", *params.ProxyRegion)
+		}
+		if params.ProxySession != nil {
+			s.log.LogDebugf("Proxy session: %s", *params.ProxySession)
+		}
 	}
 
 	resp, err := s.httpClient.Do(req)
@@ -145,6 +151,7 @@ func (s *Service) scrapeSimpleHTTP(url string, includeHTML bool, format engineap
 		return nil, fmt.Errorf("fetch: %w", err)
 	}
 	defer resp.Body.Close()
+
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("status %d", resp.StatusCode)
 	}
@@ -158,10 +165,20 @@ func (s *Service) scrapeSimpleHTTP(url string, includeHTML bool, format engineap
 
 	var content string
 
+	format := engineapi.GetV1ScrapeParamsFormat("markdown")
+	if params.Format != nil {
+		format = *params.Format
+	}
+
+	includeHTML := false
+	if params.IncludeHtml != nil {
+		includeHTML = *params.IncludeHtml
+	}
+
 	// Handle different formats
 	if format == engineapi.GetV1ScrapeParamsFormat("links") {
 		// Extract links from HTML
-		links := extractLinksFromHTML(h, url)
+		links := extractLinksFromHTML(h, params.Url)
 		content = strings.Join(links, "\n")
 	} else {
 		// Default to markdown
@@ -173,14 +190,20 @@ func (s *Service) scrapeSimpleHTTP(url string, includeHTML bool, format engineap
 
 	title := extractTitle(h)
 	// Build rich metadata from the HTML
-	meta := buildMetadataFromHTML(h, url, resp.StatusCode)
+	meta := buildMetadataFromHTML(h, params.Url, resp.StatusCode)
+
+	// Always extract and include links
+	links := extractLinksFromHTML(h, params.Url)
+	discovered := len(links)
 
 	result := &engineapi.ScrapeResponse{
-		Success:  true,
-		Url:      url,
-		Content:  &content,
-		Title:    &title,
-		Metadata: meta,
+		Success:    true,
+		Url:        params.Url,
+		Content:    &content,
+		Title:      &title,
+		Links:      links,
+		Discovered: &discovered,
+		Metadata:   meta,
 	}
 
 	// Include HTML if requested
@@ -189,17 +212,11 @@ func (s *Service) scrapeSimpleHTTP(url string, includeHTML bool, format engineap
 		result.Html = &htmlContent
 	}
 
-	// Add links to response if available
-	if format == engineapi.GetV1ScrapeParamsFormat("links") {
-		links := extractLinksFromHTML(h, url)
-		result.Links = &links
-	}
-
 	return result, nil
 }
 
-func (s *Service) scrapeWithPlaywright(url string, includeHTML bool, format engineapi.GetV1ScrapeParamsFormat) (*engineapi.ScrapeResponse, error) {
-	s.log.LogDebugf("scrapeWithPlaywright start url=%s", url)
+func (s *Service) scrapeWithPlaywright(params engineapi.GetV1ScrapeParams) (*engineapi.ScrapeResponse, error) {
+	s.log.LogDebugf("scrapeWithPlaywright start url=%s", params.Url)
 
 	pw, err := playwright.Run()
 	if err != nil {
@@ -213,7 +230,29 @@ func (s *Service) scrapeWithPlaywright(url string, includeHTML bool, format engi
 	defer pw.Stop()
 	defer browser.Close()
 
-	ctx, err := browser.NewContext()
+	// Use user agent from backend or default
+	userAgent := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+	if params.UserAgent != nil && *params.UserAgent != "" {
+		userAgent = *params.UserAgent
+		s.log.LogDebugf("Using user agent from backend: %s", userAgent)
+	}
+
+	// Log proxy settings (actual proxy setup would be handled in browser context)
+	if params.ProxyMode != nil && *params.ProxyMode != "off" {
+		s.log.LogDebugf("Proxy mode '%s' requested for Playwright: %s", *params.ProxyMode, params.Url)
+	}
+
+	ctx, err := browser.NewContext(playwright.BrowserNewContextOptions{
+		UserAgent: playwright.String(userAgent),
+		ExtraHttpHeaders: map[string]string{
+			"Accept":                    "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+			"Accept-Language":           "en-US,en;q=0.9",
+			"Accept-Encoding":           "gzip, deflate, br",
+			"DNT":                       "1",
+			"Connection":                "keep-alive",
+			"Upgrade-Insecure-Requests": "1",
+		},
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -222,14 +261,28 @@ func (s *Service) scrapeWithPlaywright(url string, includeHTML bool, format engi
 		return nil, err
 	}
 
+	s.log.LogDebugf("Using Playwright with User-Agent: %s", userAgent)
+
 	var resp playwright.Response
-	resp, navErr := page.Goto(url, playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateDomcontentloaded, Timeout: playwright.Float(10000)})
+	resp, navErr := page.Goto(params.Url, playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateDomcontentloaded, Timeout: playwright.Float(10000)})
 	if navErr != nil {
 		// fallback to full load longer timeout
-		resp, navErr = page.Goto(url, playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateLoad, Timeout: playwright.Float(20000)})
+		resp, navErr = page.Goto(params.Url, playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateLoad, Timeout: playwright.Float(20000)})
 		if navErr != nil {
 			return nil, fmt.Errorf("goto failed: %w", navErr)
 		}
+	}
+
+	// For dynamic content, wait for content to appear using provided selectors or defaults
+	waitSelectors := []string{}
+	if params.WaitForSelectors != nil {
+		waitSelectors = *params.WaitForSelectors
+	}
+
+	jsRendered := s.waitForDynamicContent(page, params.Url, waitSelectors)
+	if !jsRendered {
+		s.log.LogWarnf("JavaScript content may not have fully rendered for %s", params.Url)
+		// Continue anyway - we have some content, even if not ideal
 	}
 	content, err := page.Content()
 	if err != nil {
@@ -241,10 +294,20 @@ func (s *Service) scrapeWithPlaywright(url string, includeHTML bool, format engi
 
 	var out string
 
+	format := engineapi.GetV1ScrapeParamsFormat("markdown")
+	if params.Format != nil {
+		format = *params.Format
+	}
+
+	includeHTML := false
+	if params.IncludeHtml != nil {
+		includeHTML = *params.IncludeHtml
+	}
+
 	// Handle different formats
 	if format == engineapi.GetV1ScrapeParamsFormat("links") {
 		// Extract links from HTML
-		links := extractLinksFromHTML(content, url)
+		links := extractLinksFromHTML(content, params.Url)
 		out = strings.Join(links, "\n")
 	} else {
 		// Default to markdown
@@ -259,14 +322,20 @@ func (s *Service) scrapeWithPlaywright(url string, includeHTML bool, format engi
 	if resp != nil {
 		status = resp.Status()
 	}
-	meta := buildMetadataFromHTML(content, url, status)
+	meta := buildMetadataFromHTML(content, params.Url, status)
+
+	// Always extract and include links
+	links := extractLinksFromHTML(content, params.Url)
+	discovered := len(links)
 
 	result := &engineapi.ScrapeResponse{
-		Success:  true,
-		Url:      url,
-		Content:  &out,
-		Title:    &titleStr,
-		Metadata: meta,
+		Success:    true,
+		Url:        params.Url,
+		Content:    &out,
+		Title:      &titleStr,
+		Links:      links,
+		Discovered: &discovered,
+		Metadata:   meta,
 	}
 
 	// Include HTML if requested
@@ -275,29 +344,15 @@ func (s *Service) scrapeWithPlaywright(url string, includeHTML bool, format engi
 		result.Html = &htmlContent
 	}
 
-	// Add links to response if available
-	if format == engineapi.GetV1ScrapeParamsFormat("links") {
-		links := extractLinksFromHTML(content, url)
-		result.Links = &links
-	}
-
 	return result, nil
 }
 
-// Helpers
-
 func newHTTPClient() *http.Client {
-	return &http.Client{Timeout: 10 * time.Second}
-}
-
-func (s *Service) createHTTPRequest(url string) (*http.Request, error) {
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+	transport := &http.Transport{
+		MaxIdleConns:    100,
+		IdleConnTimeout: 90 * time.Second,
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36")
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-	return req, nil
+	return &http.Client{Transport: transport, Timeout: 10 * time.Second}
 }
 
 func (s *Service) convertHTMLToMarkdown(h string) string {
@@ -346,15 +401,21 @@ func (s *Service) cleanContent(md string) string {
 }
 
 func extractTitle(htmlContent string) string {
-	start := strings.Index(htmlContent, "<title>")
-	if start == -1 {
+	// Use case-insensitive regex to match title tags
+	titleRe := regexp.MustCompile(`(?i)<title[^>]*>(.*?)</title>`)
+	matches := titleRe.FindStringSubmatch(htmlContent)
+	if len(matches) < 2 {
 		return ""
 	}
-	end := strings.Index(htmlContent, "</title>")
-	if end == -1 || end < start {
-		return ""
-	}
-	return htmlContent[start+7 : end]
+	// Decode HTML entities and clean up the title
+	title := strings.TrimSpace(matches[1])
+	// Basic HTML entity decoding
+	title = strings.ReplaceAll(title, "&lt;", "<")
+	title = strings.ReplaceAll(title, "&gt;", ">")
+	title = strings.ReplaceAll(title, "&amp;", "&")
+	title = strings.ReplaceAll(title, "&quot;", `"`)
+	title = strings.ReplaceAll(title, "&#39;", "'")
+	return title
 }
 
 // extractLinksFromHTML extracts all href links from HTML content
@@ -421,15 +482,11 @@ func extractLinksFromHTML(htmlContent, baseURL string) []string {
 func extractPageMetadataFromHTML(htmlString string, url string) map[string]interface{} {
 	out := make(map[string]interface{})
 	out["url"] = url
-	// lightweight parse without external deps to avoid unused imports
-	// Title
 	t := extractTitle(htmlString)
 	if strings.TrimSpace(t) != "" {
 		out["title"] = strings.TrimSpace(t)
 	}
-	// very basic meta extraction (name/property + content)
-	// Keep simple to avoid heavy HTML parsing here; markdown.ConvertHTMLToMarkdown already parsed DOM earlier
-	// We still capture a few high-value tags via regex
+	// Basic meta extraction (name/property + content)
 	findMeta := func(name string) string {
 		// pattern matches: <meta name="NAME" content="...">
 		pattern := fmt.Sprintf(`<meta[^>]*(name|property|http-equiv)=["']%s["'][^>]*content=["']([^"']+)["'][^>]*>`, regexp.QuoteMeta(name))
@@ -659,4 +716,410 @@ func (s *Service) isValidResult(res *engineapi.ScrapeResponse) bool {
 		return false
 	}
 	return true
+}
+
+// ContentSignature represents the essential state of page content for comparison
+type ContentSignature struct {
+	TextLength          int    // Raw text content length
+	ElementCount        int    // Total DOM elements
+	LinkCount           int    // Number of links (common JS target)
+	AsyncLoadIndicators int    // Loading spinners, skeletons etc.
+	ContentHash         string // Simple hash for change detection
+}
+
+// ScoreDelta calculates how much this signature improved from an initial state
+func (cs *ContentSignature) ScoreDelta(initial *ContentSignature) float64 {
+	score := 0.0
+
+	// Text growth (primary signal) - 30%+ growth = good
+	if initial.TextLength > 100 { // Avoid division by tiny numbers
+		textGrowth := float64(cs.TextLength-initial.TextLength) / float64(initial.TextLength)
+		score += textGrowth * 100 // Convert to percentage points
+	} else if cs.TextLength > 200 { // New content on empty page
+		score += 50
+	}
+
+	// Element growth (secondary signal) - DOM nodes added
+	if initial.ElementCount > 10 {
+		elementGrowth := float64(cs.ElementCount-initial.ElementCount) / float64(initial.ElementCount)
+		score += elementGrowth * 30 // Lower weight than text
+	} else if cs.ElementCount > 50 { // Elements on empty page
+		score += 20
+	}
+
+	// Loading indicators resolved (tertiary signal)
+	loadingReduced := initial.AsyncLoadIndicators - cs.AsyncLoadIndicators
+	if loadingReduced > 0 {
+		score += float64(loadingReduced) * 10 // 10 points per resolved indicator
+	}
+
+	return score
+}
+
+// waitForDynamicContent waits for JavaScript to render meaningful content with validation
+func (s *Service) waitForDynamicContent(page playwright.Page, url string, waitSelectors []string) bool {
+	s.log.LogDebugf("Starting dynamic content validation for %s", url)
+
+	// Get initial content signature for comparison
+	initialSignature, err := s.getContentSignature(page)
+	if err != nil {
+		s.log.LogWarnf("Failed to get initial content signature: %v", err)
+		return false
+	}
+
+	s.log.LogDebugf("Initial content state: %d chars, %d elements, %d links",
+		initialSignature.TextLength, initialSignature.ElementCount, initialSignature.LinkCount)
+
+	// Run all strategies in parallel and get the best result
+	finalSignature := s.attemptDynamicContentWait(page, waitSelectors, initialSignature)
+
+	contentChanged := s.hasSignificantContentChange(initialSignature, finalSignature, 0.2)
+
+	s.log.LogDebugf("Content change analysis for %s: initial=%d chars, final=%d chars, changed=%v",
+		url, initialSignature.TextLength, finalSignature.TextLength, contentChanged)
+
+	if contentChanged {
+		s.log.LogSuccessf("JavaScript rendered new content for %s: %d->%d chars, %d->%d elements",
+			url, initialSignature.TextLength, finalSignature.TextLength,
+			initialSignature.ElementCount, finalSignature.ElementCount)
+		return true
+	}
+
+	s.log.LogWarnf("No significant content change detected for %s", url)
+	return false
+}
+
+// StrategyResult represents the outcome of a waiting strategy
+type StrategyResult struct {
+	Name      string
+	Success   bool
+	Signature *ContentSignature
+	Duration  time.Duration
+}
+
+// attemptDynamicContentWait runs all strategies in parallel and returns the best result
+func (s *Service) attemptDynamicContentWait(page playwright.Page, waitSelectors []string, initialSignature *ContentSignature) *ContentSignature {
+	const (
+		maxTotalTimeout   = 8000
+		defaultSelectorTO = 3000
+		defaultIdleTO     = 7000
+		defaultLoaderTO   = 4000
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*time.Duration(maxTotalTimeout))
+	defer cancel()
+
+	var wg sync.WaitGroup
+	results := make(chan StrategyResult, 3) // Buffer for all strategy results
+
+	// Strategy 1: Custom selectors
+	if len(waitSelectors) > 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			start := time.Now()
+
+			for _, selector := range waitSelectors {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					locator := page.Locator(selector)
+					if err := locator.WaitFor(playwright.LocatorWaitForOptions{
+						State:   playwright.WaitForSelectorStateVisible,
+						Timeout: playwright.Float(defaultSelectorTO),
+					}); err == nil {
+						signature, _ := s.getContentSignature(page)
+						results <- StrategyResult{
+							Name:      fmt.Sprintf("custom selector '%s'", selector),
+							Success:   true,
+							Signature: signature,
+							Duration:  time.Since(start),
+						}
+						return
+					}
+				}
+			}
+
+			// Custom selectors failed
+			results <- StrategyResult{
+				Name:     "custom selectors",
+				Success:  false,
+				Duration: time.Since(start),
+			}
+		}()
+	}
+
+	// Strategy 2: Network idle
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		start := time.Now()
+
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			if err := page.WaitForLoadState(playwright.PageWaitForLoadStateOptions{
+				State:   playwright.LoadStateNetworkidle,
+				Timeout: playwright.Float(defaultIdleTO),
+			}); err == nil {
+				signature, _ := s.getContentSignature(page)
+				results <- StrategyResult{
+					Name:      "network idle",
+					Success:   true,
+					Signature: signature,
+					Duration:  time.Since(start),
+				}
+			} else {
+				results <- StrategyResult{
+					Name:     "network idle",
+					Success:  false,
+					Duration: time.Since(start),
+				}
+			}
+		}
+	}()
+
+	// Strategy 3: Loading indicators disappear
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		start := time.Now()
+
+		loadingSelectors := []string{".loading", ".spinner", "[data-loading]", ".loader", ".skeleton"}
+		allCleared := true
+
+		for _, selector := range loadingSelectors {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				locator := page.Locator(selector)
+				if err := locator.WaitFor(playwright.LocatorWaitForOptions{
+					State:   playwright.WaitForSelectorStateHidden,
+					Timeout: playwright.Float(defaultLoaderTO),
+				}); err != nil {
+					allCleared = false
+				}
+			}
+		}
+
+		signature, _ := s.getContentSignature(page)
+		results <- StrategyResult{
+			Name:      "loading indicators cleared",
+			Success:   allCleared,
+			Signature: signature,
+			Duration:  time.Since(start),
+		}
+	}()
+
+	// Wait for all strategies to complete or timeout
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// Collect all results
+	var allResults []StrategyResult
+	for result := range results {
+		allResults = append(allResults, result)
+		s.log.LogDebugf("Strategy '%s' completed: success=%v, duration=%v", result.Name, result.Success, result.Duration)
+	}
+
+	// Find the BEST result (most content change from initial)
+	bestResult := s.chooseBestResult(allResults, initialSignature)
+
+	if bestResult != nil {
+		s.log.LogDebugf("Best strategy: '%s' with most significant content change", bestResult.Name)
+		return bestResult.Signature
+	}
+
+	s.log.LogDebugf("No strategies produced significant content changes")
+	return initialSignature // Return initial if no improvement
+}
+
+// chooseBestResult selects the strategy result with the most significant content change
+func (s *Service) chooseBestResult(results []StrategyResult, initial *ContentSignature) *StrategyResult {
+	var best *StrategyResult
+	bestScore := -1.0
+
+	for i := range results {
+		r := &results[i]
+		if !r.Success || r.Signature == nil {
+			continue
+		}
+
+		score := r.Signature.ScoreDelta(initial)
+		s.log.LogDebugf("Strategy %q scored %.2f (text: %d→%d, elems: %d→%d)",
+			r.Name, score,
+			initial.TextLength, r.Signature.TextLength,
+			initial.ElementCount, r.Signature.ElementCount,
+		)
+
+		if score > bestScore {
+			best = r
+			bestScore = score
+		}
+	}
+	return best
+}
+
+// getContentSignature captures essential page state for pragmatic JS rendering detection
+func (s *Service) getContentSignature(page playwright.Page) (*ContentSignature, error) {
+	result, err := page.Evaluate(`() => {
+		// Get visible text content (excludes scripts, styles, hidden elements)
+		const walker = document.createTreeWalker(
+			document.body,
+			NodeFilter.SHOW_TEXT,
+			{
+				acceptNode: function(node) {
+					const element = node.parentElement;
+					if (!element) return NodeFilter.FILTER_REJECT;
+					
+					// Skip hidden elements and non-content elements
+					const style = window.getComputedStyle(element);
+					if (style.display === 'none' || style.visibility === 'hidden') {
+						return NodeFilter.FILTER_REJECT;
+					}
+					
+					// Skip script and style tags
+					const tagName = element.tagName.toLowerCase();
+					if (tagName === 'script' || tagName === 'style' || tagName === 'noscript') {
+						return NodeFilter.FILTER_REJECT;
+					}
+					
+					return NodeFilter.FILTER_ACCEPT;
+				}
+			}
+		);
+		
+		let visibleText = '';
+		let node;
+		while (node = walker.nextNode()) {
+			visibleText += node.textContent;
+		}
+		
+		// Count only visible elements (not scripts, styles, hidden)
+		const visibleElements = Array.from(document.querySelectorAll('*')).filter(el => {
+			const style = window.getComputedStyle(el);
+			const tagName = el.tagName.toLowerCase();
+			return style.display !== 'none' && 
+				   style.visibility !== 'hidden' && 
+				   !['script', 'style', 'noscript', 'meta', 'link', 'title'].includes(tagName);
+		});
+		
+		const links = document.querySelectorAll('a[href]');
+		
+		// Loading indicators that should disappear when content is ready
+		const loadingIndicators = document.querySelectorAll([
+			'.loading', '.spinner', '.skeleton', '.placeholder', '.loader',
+			'[data-loading]', '[data-lazy]', '[aria-busy="true"]', '.shimmer'
+		].join(', '));
+		
+		// Simple hash for change detection
+		let hash = 0;
+		for (let i = 0; i < visibleText.length; i++) {
+			const char = visibleText.charCodeAt(i);
+			hash = ((hash << 5) - hash) + char;
+			hash = hash & hash;
+		}
+		
+		return {
+			textLength: visibleText.length,
+			elementCount: visibleElements.length,
+			linkCount: links.length,
+			asyncLoadIndicators: loadingIndicators.length,
+			contentHash: hash.toString()
+		};
+	}`)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to evaluate content signature: %w", err)
+	}
+
+	// Convert result to our struct
+	data, ok := result.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("unexpected result type from content signature evaluation")
+	}
+
+	// Simple helper to safely convert JavaScript numbers to int
+	toInt := func(v interface{}) int {
+		switch val := v.(type) {
+		case float64:
+			return int(val)
+		case int:
+			return val
+		default:
+			return 0
+		}
+	}
+
+	return &ContentSignature{
+		TextLength:          toInt(data["textLength"]),
+		ElementCount:        toInt(data["elementCount"]),
+		LinkCount:           toInt(data["linkCount"]),
+		AsyncLoadIndicators: toInt(data["asyncLoadIndicators"]),
+		ContentHash:         data["contentHash"].(string),
+	}, nil
+}
+
+// hasSignificantContentChange uses simple, pragmatic heuristics to detect JS rendering
+func (s *Service) hasSignificantContentChange(initial, final *ContentSignature, minChangeRatio float64) bool {
+	s.log.LogDebugf("Content comparison: initial={text:%d, elements:%d, links:%d, loading:%d}, final={text:%d, elements:%d, links:%d, loading:%d}",
+		initial.TextLength, initial.ElementCount, initial.LinkCount, initial.AsyncLoadIndicators,
+		final.TextLength, final.ElementCount, final.LinkCount, final.AsyncLoadIndicators)
+
+	// === SIMPLE, RELIABLE HEURISTICS ===
+
+	reasons := []string{}
+	hasChange := false
+
+	// 1. Text content growth (30% more text)
+	if initial.TextLength > 0 {
+		textGrowth := float64(final.TextLength-initial.TextLength) / float64(initial.TextLength)
+		if textGrowth > 0.3 {
+			hasChange = true
+			reasons = append(reasons, fmt.Sprintf("text grew by %.1f%%", textGrowth*100))
+		}
+	} else if final.TextLength > 200 {
+		hasChange = true
+		reasons = append(reasons, "content appeared on empty page")
+	}
+
+	// 2. Element count growth (50+ new elements)
+	elementGrowth := final.ElementCount - initial.ElementCount
+	if elementGrowth > 50 {
+		hasChange = true
+		reasons = append(reasons, fmt.Sprintf("%d new elements", elementGrowth))
+	}
+
+	// 3. Loading indicators disappeared (good sign)
+	loadingReduction := initial.AsyncLoadIndicators - final.AsyncLoadIndicators
+	if loadingReduction > 0 {
+		hasChange = true
+		reasons = append(reasons, fmt.Sprintf("%d loading indicators resolved", loadingReduction))
+	}
+
+	// 4. Links appeared (navigation/content)
+	linkGrowth := final.LinkCount - initial.LinkCount
+	if linkGrowth > 5 {
+		hasChange = true
+		reasons = append(reasons, fmt.Sprintf("%d new links", linkGrowth))
+	}
+
+	// 5. Content hash changed (fallback check)
+	if initial.ContentHash != final.ContentHash && final.TextLength > initial.TextLength+100 {
+		hasChange = true
+		reasons = append(reasons, "content hash changed with substantial text")
+	}
+
+	if hasChange {
+		s.log.LogSuccessf("✅ JS rendered new content: %s", strings.Join(reasons, ", "))
+	} else {
+		s.log.LogWarnf("❌ No significant content change detected")
+	}
+
+	return hasChange
 }

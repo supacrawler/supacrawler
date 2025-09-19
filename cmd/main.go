@@ -17,9 +17,11 @@ import (
 	"scraper/internal/core/crawl"
 	"scraper/internal/core/job"
 	"scraper/internal/core/mapper"
+	"scraper/internal/core/parse"
 	"scraper/internal/core/scrape"
 	"scraper/internal/core/screenshot"
 	"scraper/internal/logger"
+	"scraper/internal/platform/eino"
 	rds "scraper/internal/platform/redis"
 	tasks "scraper/internal/platform/tasks"
 	"scraper/internal/server"
@@ -60,6 +62,21 @@ func main() {
 		log.Fatal(err)
 	}
 
+	// Eino (LLM) service initialized from environment variables
+	einoSvc, err := eino.NewService(eino.Config{
+		Provider: cfg.LLMProvider,
+		APIKey:   cfg.GeminiAPIKey,
+		Model:    cfg.DefaultLLMModel,
+	})
+	if err != nil {
+		log.Fatalf("failed to initialize Eino service: %v", err)
+	}
+
+	parseSvc, err := parse.NewService(einoSvc, scrapeSvc, crawlSvc)
+	if err != nil {
+		log.Fatalf("failed to initialize Parse service: %v", err)
+	}
+
 	// Worker mux
 	mux := worker.NewMux()
 	mux.HandleFunc(crawl.TaskTypeCrawl, crawlSvc.HandleCrawlTask)
@@ -94,6 +111,7 @@ func main() {
 		Job:        jobSvc,
 		Crawl:      crawlSvc,
 		Scrape:     scrapeSvc,
+		Parse:      parseSvc,
 		Map:        mapSvc,
 		Screenshot: screenshotSvc,
 		Tasks:      taskClient,

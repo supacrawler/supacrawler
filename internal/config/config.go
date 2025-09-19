@@ -15,6 +15,12 @@ type Config struct {
 	SupabaseURL        string
 	SupabaseServiceKey string
 	SupabaseBucket     string
+
+	// LLM / Eino configuration (engine-owned)
+	LLMProvider      string
+	GeminiAPIKey     string
+	DefaultLLMModel  string
+	FallbackLLMModel string
 }
 
 func getenv(key, def string) string {
@@ -36,6 +42,11 @@ func Load() Config {
 		SupabaseURL:        os.Getenv("NEXT_PUBLIC_SUPABASE_URL"),
 		SupabaseServiceKey: os.Getenv("SUPABASE_SERVICE_ROLE_KEY"),
 		SupabaseBucket:     getenv("SUPABASE_STORAGE_BUCKET", "screenshots"),
+
+		LLMProvider:      getenv("LLM_PROVIDER", "gemini"),
+		GeminiAPIKey:     os.Getenv("GEMINI_API_KEY"),
+		DefaultLLMModel:  getenv("DEFAULT_LLM_MODEL", "gemini-1.5-flash"),
+		FallbackLLMModel: getenv("FALLBACK_LLM_MODEL", "gemini-1.5-pro"),
 	}
 	if cfg.RedisAddr == "" {
 		panic(fmt.Errorf("REDIS_ADDR is required"))

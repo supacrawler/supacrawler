@@ -3,6 +3,9 @@ package crawl
 import (
 	"context"
 	"encoding/json"
+	"net/url"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,6 +35,310 @@ func NewCrawlService(job *job.JobService, tasks *tasks.Client, mapper *mapper.Se
 	return &CrawlService{job: job, tasks: tasks, mapper: mapper, scrape: scrape, log: logger.New("CrawlService")}
 }
 
+// StreamCrawlToChannel performs streaming crawl and publishes each page to the provided channel
+func (s *CrawlService) StreamCrawlToChannel(ctx context.Context, req engineapi.CrawlCreateRequest, pageChan chan<- *PageResult) {
+	defer close(pageChan)
+
+	linkLimit := 0
+	if req.LinkLimit != nil {
+		linkLimit = *req.LinkLimit
+	}
+	depth := 1
+	if req.Depth != nil {
+		depth = *req.Depth
+	}
+	includeHTML := false
+	if req.IncludeHtml != nil {
+		includeHTML = *req.IncludeHtml
+	}
+	renderJs := false
+	if req.RenderJs != nil {
+		renderJs = *req.RenderJs
+	}
+	includeSubs := false
+	if req.IncludeSubdomains != nil {
+		includeSubs = *req.IncludeSubdomains
+	}
+
+	fresh := false
+	if req.Fresh != nil {
+		fresh = *req.Fresh
+	}
+
+	// Extract patterns from request
+	patterns := []string{}
+	if req.Patterns != nil {
+		patterns = *req.Patterns
+	}
+
+	// Extract user agent from request
+	var userAgent *string
+	if req.UserAgent != nil && *req.UserAgent != "" {
+		userAgent = req.UserAgent
+		s.log.LogDebugf("Using custom user agent: %s", *userAgent)
+	}
+
+	// Extract wait selectors from request
+	var waitSelectors *[]string
+	if req.WaitForSelectors != nil && len(*req.WaitForSelectors) > 0 {
+		waitSelectors = req.WaitForSelectors
+		s.log.LogDebugf("Using custom wait selectors: %v", *waitSelectors)
+	}
+
+	processed := make(map[string]struct{})
+	var mu sync.Mutex
+
+	// Track successful pages separately for proper limit enforcement
+	successCount := 0
+
+	// Scrape starting URL first, but only if it matches patterns
+	if matchesPattern(req.Url, patterns) {
+		if data, err := s.scrapeWithOptions(ctx, req.Url, includeHTML, renderJs, fresh, userAgent, waitSelectors); err != nil {
+			s.log.LogWarnf("start url scrape failed %s: %v", req.Url, err)
+			pageChan <- &PageResult{
+				URL:   req.Url,
+				Error: err.Error(),
+			}
+		} else if data != nil {
+			content := ""
+			if data.Content != nil {
+				content = *data.Content
+			}
+			title := ""
+			if data.Title != nil {
+				title = *data.Title
+			}
+
+			cleanContent := cleanContentForJSON(content)
+
+			links := data.Links
+
+			pageContent := engineapi.PageContent{
+				Markdown: cleanContent,
+				Links:    links,
+				Metadata: buildPageMetadataFromScrapeMetadata(data.Metadata, title),
+			}
+			if includeHTML && data.Html != nil {
+				pageContent.Html = data.Html
+			}
+
+			pageChan <- &PageResult{
+				URL:         req.Url,
+				PageContent: &pageContent,
+			}
+
+			mu.Lock()
+			processed[req.Url] = struct{}{}
+			successCount = 1 // Start URL was successful
+			mu.Unlock()
+		}
+	}
+
+	// Setup streaming mapper
+	linksCh := make(chan string, 256)
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	go func() {
+		s.log.LogDebugf("Starting mapper with linkLimit=%d for URL=%s", linkLimit, req.Url)
+
+		// First try the mapper
+		mapperFoundLinks := 0
+		tempLinks := make([]string, 0)
+
+		// Collect all mapper results first
+		mapperCh := make(chan string, 256)
+		go func() {
+			defer close(mapperCh)
+			_ = s.mapper.MapLinksStream(streamCtx, mapper.Request{URL: req.Url, Depth: depth, LinkLimit: linkLimit, IncludeSubdomains: includeSubs, Patterns: patterns}, mapperCh)
+		}()
+
+		// Collect mapper results
+		for link := range mapperCh {
+			tempLinks = append(tempLinks, link)
+			mapperFoundLinks++
+		}
+
+		s.log.LogDebugf("Mapper found %d links", mapperFoundLinks)
+
+		// If mapper found very few links, try scrape service fallback
+		s.log.LogDebugf("Checking fallback conditions: mapperFound=%d < 3 AND linkLimit=%d > 3 = %v",
+			mapperFoundLinks, linkLimit, mapperFoundLinks < 3 && linkLimit > 3)
+		if mapperFoundLinks < 3 && linkLimit > 3 {
+			s.log.LogInfof("🔄 Mapper found only %d links, trying scrape service fallback for dynamic content", mapperFoundLinks)
+
+			// Use scrape service to get links from the main page
+			if additionalLinks := s.getLinks(streamCtx, req.Url, renderJs, userAgent, waitSelectors); len(additionalLinks) > 0 {
+				s.log.LogInfof("📦 Scrape service found %d additional links", len(additionalLinks))
+
+				// Filter and add additional links
+				for _, link := range additionalLinks {
+					if matchesPattern(link, patterns) && len(tempLinks) < linkLimit {
+						// Avoid duplicates
+						found := false
+						for _, existing := range tempLinks {
+							if existing == link {
+								found = true
+								break
+							}
+						}
+						if !found {
+							tempLinks = append(tempLinks, link)
+						}
+					}
+				}
+			}
+		}
+
+		// Send all collected links to the channel
+		for _, link := range tempLinks {
+			select {
+			case linksCh <- link:
+			case <-streamCtx.Done():
+				close(linksCh)
+				return
+			}
+		}
+		close(linksCh)
+	}()
+
+	// Worker pool for streaming
+	maxWorkers := 10
+	if renderJs {
+		maxWorkers = 2
+	}
+	var wg sync.WaitGroup
+
+	// Track reserved slots to prevent race conditions
+	reservedSlots := 0
+
+	accept := func(u string) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		if _, seen := processed[u]; seen {
+			return false
+		}
+		// Only stop if we have enough successful pages - allow some over-reservation
+		// This ensures we keep trying even if some reserved slots fail
+		if linkLimit > 0 && successCount >= linkLimit {
+			return false
+		}
+		// But prevent excessive over-processing (more than 2x the limit)
+		if linkLimit > 0 && (successCount+reservedSlots) >= (linkLimit*2) {
+			return false
+		}
+		processed[u] = struct{}{}
+		reservedSlots++ // Reserve a slot for this URL
+		return true
+	}
+
+	releaseSlot := func() {
+		reservedSlots--
+	}
+
+	worker := func(id int) {
+		defer wg.Done()
+		for u := range linksCh {
+			// Check if we should continue processing this URL
+			shouldProcess := accept(u)
+			if !shouldProcess {
+				// Check if we've reached our success limit - if so, we can stop
+				mu.Lock()
+				reachedLimit := linkLimit > 0 && successCount >= linkLimit
+				mu.Unlock()
+				if reachedLimit {
+					cancel()
+					return
+				}
+				continue
+			}
+
+			res, err := s.scrapeWithOptions(ctx, u, includeHTML, renderJs, fresh, userAgent, waitSelectors)
+			if err != nil {
+				pageChan <- &PageResult{
+					URL:   u,
+					Error: err.Error(),
+				}
+				// If we failed but haven't reached our success limit, we should continue trying more URLs
+				// So we don't count failures toward our processed limit
+				mu.Lock()
+				delete(processed, u)
+				releaseSlot() // Release the reserved slot since we failed
+				mu.Unlock()
+			} else if res != nil {
+				content := ""
+				if res.Content != nil {
+					content = *res.Content
+				}
+				title := ""
+				if res.Title != nil {
+					title = *res.Title
+				}
+
+				cleanContent := cleanContentForJSON(content)
+
+				// Extract links from scraped data
+				links := res.Links
+
+				pageContent := engineapi.PageContent{
+					Markdown: cleanContent,
+					Links:    links,
+					Metadata: buildPageMetadataFromScrapeMetadata(res.Metadata, title),
+				}
+				if includeHTML && res.Html != nil {
+					pageContent.Html = res.Html
+				}
+
+				pageChan <- &PageResult{
+					URL:         u,
+					PageContent: &pageContent,
+				}
+
+				// Increment success count and check if we've reached our limit
+				mu.Lock()
+				successCount++
+				// Don't release slot since we successfully used it
+				if linkLimit > 0 && successCount >= linkLimit {
+					s.log.LogDebugf("worker %d: reached success limit (%d/%d, reserved: %d), stopping", id, successCount, linkLimit, reservedSlots)
+					mu.Unlock()
+					cancel()
+					return
+				}
+				mu.Unlock()
+			} else {
+				// If res is nil, remove from processed so we can try more
+				mu.Lock()
+				delete(processed, u)
+				releaseSlot() // Release the reserved slot
+				mu.Unlock()
+			}
+		}
+	}
+
+	for i := 0; i < maxWorkers; i++ {
+		wg.Add(1)
+		go worker(i + 1)
+	}
+
+	// Safety timeout
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Minute):
+		s.log.LogWarnf("stream crawl timeout for %s", req.Url)
+		cancel()
+		<-done
+	}
+}
+
+// PageResult represents a single page result for streaming
+type PageResult struct {
+	URL         string                 `json:"url"`
+	PageContent *engineapi.PageContent `json:"page_content,omitempty"`
+	Error       string                 `json:"error,omitempty"`
+}
+
 type CrawlTaskPayload struct {
 	JobID   string                       `json:"job_id"`
 	Request engineapi.CrawlCreateRequest `json:"request"`
@@ -48,7 +355,7 @@ func (s *CrawlService) Enqueue(ctx context.Context, req engineapi.CrawlCreateReq
 	if err := s.tasks.Enqueue(task, "default", 10); err != nil {
 		return "", err
 	}
-	s.log.LogInfof("enqueued crawl job %s for %s", id, req.Url)
+	s.log.LogInfof("enqueued crawl job %s for %s with max pages %d", id, req.Url, req.LinkLimit)
 	return id, nil
 }
 
@@ -64,6 +371,20 @@ func (s *CrawlService) HandleCrawlTask(ctx context.Context, task *asynq.Task) er
 
 	// Streamed crawl for faster time-to-first and strict limit control
 	result, errs := s.streamCrawl(ctx, p.Request)
+
+	// Truncate results if we exceeded the limit
+	if result != nil && p.Request.LinkLimit != nil && len(*result) > *p.Request.LinkLimit {
+		truncated := make(map[string]engineapi.PageContent)
+		count := 0
+		for url, content := range *result {
+			if count >= *p.Request.LinkLimit {
+				break
+			}
+			truncated[url] = content
+			count++
+		}
+		result = &truncated
+	}
 
 	data := engineapi.CrawlJobData{}
 	if p.Request.Url != "" {
@@ -81,7 +402,7 @@ func (s *CrawlService) HandleCrawlTask(ctx context.Context, task *asynq.Task) er
 		data.Statistics = st
 	}
 
-	s.log.LogInfof("completing crawl job %s: success=%d failed=%d total=%d", p.JobID, derefInt(st.SuccessfulPages), derefInt(st.FailedPages), derefInt(st.TotalPages))
+	s.log.LogInfof("completing crawl job %s: success=%d failed=%d total=%d (target was %d)", p.JobID, derefInt(st.SuccessfulPages), derefInt(st.FailedPages), derefInt(st.TotalPages), derefInt(p.Request.LinkLimit))
 	return s.job.Complete(ctx, p.JobID, job.TypeCrawl, job.StatusCompleted, data)
 }
 
@@ -119,34 +440,61 @@ func (s *CrawlService) streamCrawl(ctx context.Context, r engineapi.CrawlCreateR
 		fresh = *r.Fresh
 	}
 
-	// Scrape starting URL first
-	if data, err := s.scrapeWithFreshOption(ctx, r.Url, includeHTML, renderJs, fresh); err != nil {
-		s.log.LogWarnf("start url scrape failed %s: %v", r.Url, err)
-		errs[r.Url] = err.Error()
-	} else if data != nil {
-		content := ""
-		if data.Content != nil {
-			content = *data.Content
-		}
-		title := ""
-		if data.Title != nil {
-			title = *data.Title
-		}
-		// Clean markdown content to ensure JSON compatibility
-		cleanContent := cleanContentForJSON(content)
-		pageContent := engineapi.PageContent{
-			Markdown: cleanContent,
-			Metadata: buildPageMetadataFromScrapeMetadata(data.Metadata, title),
-		}
-		// Include HTML if requested
-		if includeHTML && data.Html != nil {
-			pageContent.Html = data.Html
-		}
-		out[r.Url] = pageContent
-		mu.Lock()
-		processed[r.Url] = struct{}{}
-		mu.Unlock()
+	// Extract patterns from request
+	patterns := []string{}
+	if r.Patterns != nil {
+		patterns = *r.Patterns
 	}
+
+	// Extract user agent from request
+	var userAgent *string
+	if r.UserAgent != nil && *r.UserAgent != "" {
+		userAgent = r.UserAgent
+		s.log.LogDebugf("Using custom user agent: %s", *userAgent)
+	}
+
+	// Extract wait selectors from request
+	var waitSelectors *[]string
+	if r.WaitForSelectors != nil && len(*r.WaitForSelectors) > 0 {
+		waitSelectors = r.WaitForSelectors
+		s.log.LogDebugf("Using custom wait selectors: %v", *waitSelectors)
+	}
+
+	// Scrape starting URL first, but only if it matches patterns
+	if matchesPattern(r.Url, patterns) {
+		if data, err := s.scrapeWithOptions(ctx, r.Url, includeHTML, renderJs, fresh, userAgent, waitSelectors); err != nil {
+			s.log.LogWarnf("start url scrape failed %s: %v", r.Url, err)
+			errs[r.Url] = err.Error()
+		} else if data != nil {
+			content := ""
+			if data.Content != nil {
+				content = *data.Content
+			}
+			title := ""
+			if data.Title != nil {
+				title = *data.Title
+			}
+			// Clean markdown content to ensure JSON compatibility
+			cleanContent := cleanContentForJSON(content)
+
+			// Extract links from scraped data
+			links := data.Links
+
+			pageContent := engineapi.PageContent{
+				Markdown: cleanContent,
+				Links:    links,
+				Metadata: buildPageMetadataFromScrapeMetadata(data.Metadata, title),
+			}
+			// Include HTML if requested
+			if includeHTML && data.Html != nil {
+				pageContent.Html = data.Html
+			}
+			out[r.Url] = pageContent
+		}
+	}
+	mu.Lock()
+	processed[r.Url] = struct{}{}
+	mu.Unlock()
 
 	// Setup streaming mapper
 	linksCh := make(chan string, 256)
@@ -154,16 +502,19 @@ func (s *CrawlService) streamCrawl(ctx context.Context, r engineapi.CrawlCreateR
 	defer cancel()
 
 	go func() {
-		_ = s.mapper.MapLinksStream(streamCtx, mapper.Request{URL: r.Url, Depth: depth, LinkLimit: 0, IncludeSubdomains: includeSubs}, linksCh)
+		_ = s.mapper.MapLinksStream(streamCtx, mapper.Request{URL: r.Url, Depth: depth, LinkLimit: linkLimit, IncludeSubdomains: includeSubs, Patterns: patterns}, linksCh)
 		close(linksCh)
 	}()
 
 	// Worker pool
-	maxWorkers := 10
+	maxWorkers := 20
 	if renderJs {
 		maxWorkers = 2
 	}
 	var wg sync.WaitGroup
+
+	// Track reserved slots to prevent race conditions
+	reservedSlots := 0
 
 	accept := func(u string) bool {
 		mu.Lock()
@@ -171,28 +522,49 @@ func (s *CrawlService) streamCrawl(ctx context.Context, r engineapi.CrawlCreateR
 		if _, seen := processed[u]; seen {
 			return false
 		}
-		if linkLimit > 0 && (len(out)+len(errs)) >= linkLimit {
+		// Only stop if we have enough successful pages - allow some over-reservation
+		// This ensures we keep trying even if some reserved slots fail
+		if linkLimit > 0 && len(out) >= linkLimit {
+			return false
+		}
+		// But prevent excessive over-processing (more than 2x the limit)
+		if linkLimit > 0 && (len(out)+reservedSlots) >= (linkLimit*2) {
 			return false
 		}
 		processed[u] = struct{}{}
+		reservedSlots++ // Reserve a slot for this URL
 		return true
+	}
+
+	releaseSlot := func() {
+		reservedSlots--
 	}
 
 	worker := func(id int) {
 		defer wg.Done()
 		for u := range linksCh {
-			if !accept(u) {
-				// Stop early if we've hit the cap
-				if linkLimit > 0 && (len(out)+len(errs)) >= linkLimit {
+			// Check if we should continue processing this URL
+			shouldProcess := accept(u)
+			if !shouldProcess {
+				// Check if we've reached our success limit - if so, we can stop
+				mu.Lock()
+				reachedLimit := linkLimit > 0 && len(out) >= linkLimit
+				mu.Unlock()
+				if reachedLimit {
 					cancel()
 					return
 				}
 				continue
 			}
-			res, err := s.scrapeWithFreshOption(ctx, u, includeHTML, renderJs, fresh)
+
+			res, err := s.scrapeWithOptions(ctx, u, includeHTML, renderJs, fresh, userAgent, waitSelectors)
 			if err != nil {
 				mu.Lock()
 				errs[u] = err.Error()
+				// If we failed but haven't reached our success limit, we should continue trying more URLs
+				// So we don't count failures toward our processed limit
+				delete(processed, u)
+				releaseSlot() // Release the reserved slot since we failed
 				mu.Unlock()
 			} else if res != nil {
 				content := ""
@@ -206,8 +578,13 @@ func (s *CrawlService) streamCrawl(ctx context.Context, r engineapi.CrawlCreateR
 				mu.Lock()
 				// Clean markdown content to ensure JSON compatibility
 				cleanContent := cleanContentForJSON(content)
+
+				// Extract links from scraped data
+				links := res.Links
+
 				pageContent := engineapi.PageContent{
 					Markdown: cleanContent,
+					Links:    links,
 					Metadata: buildPageMetadataFromScrapeMetadata(res.Metadata, title),
 				}
 				// Include HTML if requested
@@ -215,12 +592,22 @@ func (s *CrawlService) streamCrawl(ctx context.Context, r engineapi.CrawlCreateR
 					pageContent.Html = res.Html
 				}
 				out[u] = pageContent
+				// Don't release slot - we successfully used it
+
+				// Check if we've reached our success limit
+				if linkLimit > 0 && len(out) >= linkLimit {
+					s.log.LogDebugf("worker %d: reached success limit (%d/%d, reserved: %d), stopping", id, len(out), linkLimit, reservedSlots)
+					mu.Unlock()
+					cancel()
+					return
+				}
 				mu.Unlock()
-			}
-			// early stop if reached limit
-			if linkLimit > 0 && (len(out)+len(errs)) >= linkLimit {
-				cancel()
-				return
+			} else {
+				// If res is nil (shouldn't happen but just in case), remove from processed so we can try more
+				mu.Lock()
+				delete(processed, u)
+				releaseSlot() // Release the reserved slot
+				mu.Unlock()
 			}
 		}
 	}
@@ -243,106 +630,8 @@ func (s *CrawlService) streamCrawl(ctx context.Context, r engineapi.CrawlCreateR
 	return &out, &errs
 }
 
-func (s *CrawlService) crawl(ctx context.Context, r engineapi.CrawlCreateRequest) (*map[string]engineapi.PageContent, *map[string]string) {
-	// Check if fresh data is requested
-	fresh := false
-	if r.Fresh != nil {
-		fresh = *r.Fresh
-	}
-	out := make(map[string]engineapi.PageContent)
-	errs := make(map[string]string)
-	// map links
-	depth := 0
-	if r.Depth != nil {
-		depth = *r.Depth
-	}
-	linkLimit := 0
-	if r.LinkLimit != nil {
-		linkLimit = *r.LinkLimit
-	}
-	incSubs := false
-	if r.IncludeSubdomains != nil {
-		incSubs = *r.IncludeSubdomains
-	}
-
-	mr, err := s.mapper.MapURL(mapper.Request{URL: r.Url, Depth: depth, LinkLimit: linkLimit, IncludeSubdomains: incSubs})
-	if err != nil {
-		errs[r.Url] = err.Error()
-		return &out, &errs
-	}
-	links := append([]string{r.Url}, mr.Links...)
-	if linkLimit > 0 && len(links) > linkLimit {
-		links = links[:linkLimit]
-	}
-
-	includeHTML := false
-	if r.IncludeHtml != nil {
-		includeHTML = *r.IncludeHtml
-	}
-	renderJs := false
-	if r.RenderJs != nil {
-		renderJs = *r.RenderJs
-	}
-
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, func() int {
-		if renderJs {
-			return 2
-		}
-		return 8
-	}())
-	for _, u := range links {
-		u := u
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-
-			result, e := s.scrapeWithFreshOption(ctx, u, includeHTML, renderJs, fresh)
-			if e != nil {
-				errs[u] = e.Error()
-				return
-			}
-
-			content := ""
-			if result.Content != nil {
-				content = *result.Content
-			}
-			title := ""
-			if result.Title != nil {
-				title = *result.Title
-			}
-
-			// Build engine page content
-			// Clean markdown content to ensure JSON compatibility
-			cleanContent := cleanContentForJSON(content)
-			pc := engineapi.PageContent{
-				Markdown: cleanContent,
-				Metadata: buildPageMetadataFromScrapeMetadata(result.Metadata, title),
-			}
-			// Include HTML if requested
-			if includeHTML && result.Html != nil {
-				pc.Html = result.Html
-			}
-			out[u] = pc
-		}()
-	}
-	wg.Wait()
-	return &out, &errs
-}
-
-func (s *CrawlService) scrapeWithCache(ctx context.Context, url string, includeHTML, renderJs bool) (*engineapi.ScrapeResponse, error) {
-	format := engineapi.GetV1ScrapeParamsFormat("markdown")
-	if includeHTML {
-		format = engineapi.GetV1ScrapeParamsFormat("html")
-	}
-	params := engineapi.GetV1ScrapeParams{Url: url, Format: &format, RenderJs: &renderJs, IncludeHtml: &includeHTML}
-	return s.scrape.ScrapeURL(ctx, params)
-}
-
-// scrapeWithFreshOption decides whether to use cache or fresh scraping based on the fresh parameter
-func (s *CrawlService) scrapeWithFreshOption(ctx context.Context, url string, includeHTML, renderJs, fresh bool) (*engineapi.ScrapeResponse, error) {
+// scrapeWithOptions handles scraping with all optional parameters: cache, user agent, and selectors
+func (s *CrawlService) scrapeWithOptions(ctx context.Context, url string, includeHTML, renderJs, fresh bool, userAgent *string, waitSelectors *[]string) (*engineapi.ScrapeResponse, error) {
 	if fresh {
 		// Bypass cache and scrape fresh
 		format := engineapi.GetV1ScrapeParamsFormat("markdown")
@@ -350,12 +639,63 @@ func (s *CrawlService) scrapeWithFreshOption(ctx context.Context, url string, in
 			format = engineapi.GetV1ScrapeParamsFormat("html")
 		}
 		params := engineapi.GetV1ScrapeParams{Url: url, Format: &format, RenderJs: &renderJs, Fresh: &fresh, IncludeHtml: &includeHTML}
+
+		// Set user agent if provided
+		if userAgent != nil && *userAgent != "" {
+			params.UserAgent = userAgent
+		}
+
+		// Set wait selectors if provided
+		if waitSelectors != nil && len(*waitSelectors) > 0 {
+			params.WaitForSelectors = waitSelectors
+		}
+
+		// Bot protection can be enabled via request parameters from backend
 		return s.scrape.ScrapeURL(ctx, params)
 	} else {
 		// Use cache if available
 		result, _, err := s.scrape.ScrapeWithCache(ctx, url, includeHTML, renderJs)
 		return result, err
 	}
+}
+
+// getLinks uses the scrape service to extract links from dynamic content with optional user agent and selectors
+func (s *CrawlService) getLinks(ctx context.Context, url string, renderJs bool, userAgent *string, waitSelectors *[]string) []string {
+	// Use scrape service with "links" format to extract all links
+	format := engineapi.GetV1ScrapeParamsFormat("links")
+	params := engineapi.GetV1ScrapeParams{
+		Url:      url,
+		Format:   &format,
+		RenderJs: &renderJs,
+	}
+
+	// Set user agent if provided
+	if userAgent != nil && *userAgent != "" {
+		params.UserAgent = userAgent
+		s.log.LogDebugf("Using custom user agent for link extraction: %s", *userAgent)
+	}
+
+	// Set wait selectors if provided
+	if waitSelectors != nil && len(*waitSelectors) > 0 {
+		params.WaitForSelectors = waitSelectors
+		s.log.LogDebugf("Using custom wait selectors for link extraction: %v", *waitSelectors)
+	}
+
+	s.log.LogDebugf("Using scrape service to extract links from: %s", url)
+
+	result, err := s.scrape.ScrapeURL(ctx, params)
+	if err != nil {
+		s.log.LogWarnf("Scrape service link extraction failed for %s: %v", url, err)
+		return nil
+	}
+
+	if len(result.Links) == 0 {
+		s.log.LogDebugf("No links found by scrape service for: %s", url)
+		return nil
+	}
+
+	s.log.LogDebugf("Scrape service extracted %d links from: %s", len(result.Links), url)
+	return result.Links
 }
 
 func stats(res *map[string]engineapi.PageContent, errs *map[string]string) *engineapi.CrawlStatistics {
@@ -434,4 +774,44 @@ func buildPageMetadataFromScrapeMetadata(scrapeMetadata engineapi.ScrapeMetadata
 	}
 
 	return meta
+}
+
+// matchesPattern checks if a URL matches any of the given patterns
+func matchesPattern(u string, patterns []string) bool {
+	if len(patterns) == 0 {
+		return true // If no patterns, allow all URLs
+	}
+
+	parsed, err := url.Parse(u)
+	if err != nil {
+		return false
+	}
+
+	path := parsed.Path
+	if path == "" {
+		path = "/"
+	}
+
+	for _, pattern := range patterns {
+		// Use filepath.Match for glob-style pattern matching
+		matched, err := filepath.Match(pattern, path)
+		if err == nil && matched {
+			return true
+		}
+
+		// Also check if pattern is a prefix (for patterns like "/blog/*")
+		if strings.HasSuffix(pattern, "*") {
+			prefix := strings.TrimSuffix(pattern, "*")
+			// Handle exact match (e.g., "/blog" matches "/blog/*")
+			if path == strings.TrimSuffix(prefix, "/") {
+				return true
+			}
+			// Handle prefix match (e.g., "/blog/post" matches "/blog/*")
+			if strings.HasPrefix(path, prefix) {
+				return true
+			}
+		}
+	}
+
+	return false
 }

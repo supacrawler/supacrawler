@@ -4,6 +4,7 @@ import (
 	"scraper/internal/core/crawl"
 	"scraper/internal/core/job"
 	"scraper/internal/core/mapper"
+	"scraper/internal/core/parse"
 	"scraper/internal/core/scrape"
 	"scraper/internal/core/screenshot"
 	"scraper/internal/health"
@@ -17,6 +18,7 @@ type Dependencies struct {
 	Job        *job.JobService
 	Crawl      *crawl.CrawlService
 	Scrape     *scrape.Service
+	Parse      *parse.Service
 	Map        *mapper.Service
 	Screenshot *screenshot.Service
 	Tasks      *tasks.Client
@@ -32,6 +34,11 @@ func RegisterRoutes(app *fiber.App, d Dependencies) *health.HealthHandler {
 
 	scrapeHandler := scrape.NewHandler(d.Scrape, d.Map)
 	api.Get("/scrape", scrapeHandler.HandleGetScrape)
+
+	parseHandler := parse.NewHandler(d.Parse, d.Job)
+	api.Post("/parse", parseHandler.HandleParseContent)
+	api.Get("/parse/templates", parseHandler.HandleGetTemplates)
+	api.Get("/parse/examples", parseHandler.HandleGetExamples)
 
 	crawlHandler := crawl.NewCrawlHandler(d.Job, d.Crawl)
 	api.Post("/crawl", crawlHandler.HandleCreateCrawl)

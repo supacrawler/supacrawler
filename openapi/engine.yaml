@@ -9,6 +9,7 @@ servers:
 tags:
   - name: health
   - name: scrape
+  - name: parse
   - name: jobs
   - name: screenshots
 paths:
@@ -61,6 +62,51 @@ paths:
           name: fresh
           schema:
             type: boolean
+        - in: query
+          name: proxy_mode
+          schema:
+            type: string
+            enum: [off, shared_pool, residential]
+            default: off
+        - in: query
+          name: proxy_region
+          schema:
+            type: string
+            description: ISO country code (e.g., "us", "eu", "gb")
+        - in: query
+          name: proxy_session
+          schema:
+            type: string
+            description: Sticky session key for proxy consistency
+        - in: query
+          name: rotate_user_agent
+          schema:
+            type: boolean
+            default: true
+        - in: query
+          name: enable_bot_protection
+          schema:
+            type: boolean
+            default: true
+        - in: query
+          name: max_consecutive_errors
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 20
+            default: 5
+        - in: query
+          name: user_agent
+          schema:
+            type: string
+            description: Specific user agent to use (selected by backend)
+        - in: query
+          name: wait_for_selectors
+          schema:
+            type: array
+            items:
+              type: string
+            description: CSS selectors to wait for before considering page loaded (for dynamic content)
       responses:
         '200':
           description: Scrape response
@@ -120,6 +166,54 @@ paths:
                 $ref: '#/components/schemas/CrawlStatusResponse'
         '404':
           $ref: '#/components/responses/NotFound'
+  /v1/parse:
+    post:
+      tags: [parse]
+      summary: Parse HTML or Markdown content using LLM
+      description: Extract structured data from HTML or Markdown content with customizable output schemas
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ParseCreateRequest'
+      responses:
+        '200':
+          description: Parse operation result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParseResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/parse/templates:
+    get:
+      tags: [parse]
+      summary: Get available parse templates
+      description: List all available prompt templates with descriptions and supported content types
+      responses:
+        '200':
+          description: Available templates and configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParseTemplatesResponse'
+  /v1/parse/examples:
+    get:
+      tags: [parse]
+      summary: Get example output specifications
+      description: Get example output schemas for different content types
+      responses:
+        '200':
+          description: Example output specifications
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParseExamplesResponse'
   /v1/screenshots:
     post:
       tags: [screenshots]
@@ -232,11 +326,13 @@ components:
           type: array
           items:
             type: string
+          description: All discovered links on the page (always included)
         discovered:
           type: integer
+          description: Number of links discovered
         metadata:
           $ref: '#/components/schemas/ScrapeMetadata'
-      required: [success, url, metadata]
+      required: [success, url, links, metadata]
 
     ScrapeMetadata:
       type: object
@@ -295,6 +391,44 @@ components:
         fresh:
           type: boolean
           description: Bypass cache and fetch fresh content
+        patterns:
+          type: array
+          items:
+            type: string
+          description: URL patterns to match (e.g., ["/blog/*", "/docs/*"])
+        proxy_mode:
+          type: string
+          enum: [off, shared_pool, residential]
+          default: off
+          description: Proxy rotation mode
+        proxy_region:
+          type: string
+          description: ISO country code (e.g., "us", "eu", "gb")
+        proxy_session:
+          type: string
+          description: Sticky session key for proxy consistency
+        rotate_user_agent:
+          type: boolean
+          default: true
+          description: Enable user agent rotation
+        enable_bot_protection:
+          type: boolean
+          default: true
+          description: Enable anti-bot detection and pivoting
+        max_consecutive_errors:
+          type: integer
+          minimum: 1
+          maximum: 20
+          default: 5
+          description: Max consecutive errors before pivoting strategy
+        user_agent:
+          type: string
+          description: Specific user agent to use (selected by backend)
+        wait_for_selectors:
+          type: array
+          items:
+            type: string
+          description: CSS selectors to wait for before considering page loaded (for dynamic content)
       required: [url]
 
     CrawlCreateResponse:
@@ -349,10 +483,16 @@ components:
         html:
           type: string
           x-order: 2
+        links:
+          type: array
+          items:
+            type: string
+          description: All discovered links on the page
+          x-order: 3
         metadata:
           $ref: '#/components/schemas/PageMetadata'
-          x-order: 3
-      required: [markdown, metadata]
+          x-order: 4
+      required: [markdown, links, metadata]
 
     PageMetadata:
       type: object
@@ -396,6 +536,150 @@ components:
           type: integer
         failed_pages:
           type: integer
+
+    ParseCreateRequest:
+      type: object
+      properties:
+        prompt:
+          type: string
+          description: Natural language prompt that may include URLs and extraction instructions
+          example: "Crawl https://example.com/blog and give me the 5 most recent posts in CSV."
+        schema:
+          type: object
+          additionalProperties: true
+          description: Optional JSON schema for structured output
+          example:
+            type: object
+            properties:
+              posts:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    title:
+                      type: string
+                    date:
+                      type: string
+                    url:
+                      type: string
+                  required: ["title", "date", "url"]
+            required: ["posts"]
+        output_format:
+          type: string
+          enum: [json, csv, markdown, xml, yaml]
+          default: json
+          description: Preferred output format
+        stream:
+          type: boolean
+          default: false
+          description: Enable streaming responses for real-time results
+        max_depth:
+          type: integer
+          minimum: 1
+          maximum: 3
+          default: 1
+          description: Maximum crawl depth (if crawling is needed)
+        max_pages:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 10
+          description: Maximum pages to process
+      required: [prompt]
+
+    ParseResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          description: Whether the parsing operation succeeded
+        data:
+          description: Extracted data as JSON object, CSV string, or markdown
+        workflow_status:
+          type: string
+          enum: [analyzing, crawling, scraping, extracting, formatting, completed, failed]
+          description: Current workflow stage
+        pages_processed:
+          type: integer
+          description: Number of pages processed so far
+        total_pages:
+          type: integer
+          description: Total pages discovered (if known)
+        partial_results:
+          type: array
+          items:
+            type: object
+          description: Incremental results for streaming responses
+        execution_time:
+          type: integer
+          description: Total execution time in milliseconds
+        error:
+          type: string
+          description: Error message if parsing failed
+      required: [success]
+
+    ParseValidationResult:
+      type: object
+      properties:
+        is_valid:
+          type: boolean
+          description: Whether the response is valid
+        format:
+          type: string
+          enum: [json, csv]
+          description: Format of the response
+        errors:
+          type: array
+          items:
+            type: string
+          description: Validation errors
+        fields_found:
+          type: array
+          items:
+            type: string
+          description: JSON fields discovered
+        row_count:
+          type: integer
+          description: CSV row count
+        column_count:
+          type: integer
+          description: CSV column count
+      required: [is_valid, format, errors]
+
+    ParseTemplatesResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        templates:
+          type: object
+          additionalProperties:
+            type: string
+          description: Available templates with descriptions
+        content_types:
+          type: array
+          items:
+            type: string
+          description: Supported content types
+        output_formats:
+          type: array
+          items:
+            type: string
+          description: Supported output formats
+      required: [success, templates, content_types, output_formats]
+
+    ParseExamplesResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        examples:
+          type: object
+          additionalProperties:
+            type: object
+            additionalProperties: true
+          description: Example output specifications
+      required: [success, examples]
 
     ScreenshotCreateRequest:
       type: object

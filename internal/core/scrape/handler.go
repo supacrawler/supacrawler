@@ -49,7 +49,7 @@ func (h *Handler) HandleGetScrape(c *fiber.Ctx) error {
 			return c.Status(fiber.StatusInternalServerError).JSON(engineapi.Error{Success: &[]bool{false}[0], Error: &errMsg})
 		}
 		discovered := len(res.Links)
-		return c.JSON(engineapi.ScrapeResponse{Success: true, Url: p.Url, Links: &res.Links, Discovered: &discovered, Metadata: engineapi.ScrapeMetadata{}})
+		return c.JSON(engineapi.ScrapeResponse{Success: true, Url: p.Url, Links: res.Links, Discovered: &discovered, Metadata: engineapi.ScrapeMetadata{}})
 	}
 
 	result, err := h.service.ScrapeURL(c.Context(), p)

@@ -16,6 +16,12 @@ if [ -f "/run/secrets/redis_password" ]; then
   echo "Loaded REDIS_PASSWORD from secret"
 fi
 
+# Gemini API Key for LLM provider
+if [ -f "/run/secrets/gemini_api_key" ]; then
+  export GEMINI_API_KEY=$(cat /run/secrets/gemini_api_key | tr -d '"')
+  echo "Loaded GEMINI_API_KEY from secret"
+fi
+
 # Attempt to ping Redis with retries
 echo "Testing Redis connection..."
 REDIS_HOST=$(echo $REDIS_ADDR | cut -d':' -f1)

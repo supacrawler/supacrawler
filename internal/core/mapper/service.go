@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +27,7 @@ type Request struct {
 	Depth             int
 	LinkLimit         int
 	IncludeSubdomains bool
+	Patterns          []string
 }
 
 type Result struct {
@@ -68,6 +70,10 @@ func (s *Service) MapURL(req Request) (*Result, error) {
 			if !s.robots.IsAllowed(link, "SupacrawlerBot") {
 				return
 			}
+			// Check if link matches patterns
+			if !matchesPattern(link, req.Patterns) {
+				return
+			}
 			mu.Lock()
 			_, exists := links[link]
 			if !exists {
@@ -102,6 +108,7 @@ func (s *Service) MapURL(req Request) (*Result, error) {
 func (s *Service) MapLinksStream(ctx context.Context, req Request, out chan<- string) error {
 	s.log.LogDebugf("Map stream start url=%s depth=%d limit=%d subdomains=%v", req.URL, req.Depth, req.LinkLimit, req.IncludeSubdomains)
 	links := make(map[string]struct{})
+	var mu sync.Mutex
 	c := colly.NewCollector(colly.MaxDepth(max(1, req.Depth)), colly.Async(true))
 	cleaned := cleanURL(req.URL)
 	dom := extractDomain(cleaned)
@@ -115,14 +122,12 @@ func (s *Service) MapLinksStream(ctx context.Context, req Request, out chan<- st
 	c.Limit(&colly.LimitRule{DomainGlob: "*", Parallelism: 10, RandomDelay: 500 * time.Millisecond})
 
 	c.OnHTML("a[href]", func(e *colly.HTMLElement) {
-		if limitReached {
-			return
-		}
 		select {
 		case <-ctx.Done():
 			return
 		default:
 		}
+
 		link := e.Request.AbsoluteURL(e.Attr("href"))
 		link = normalize(link)
 		if link == "" {
@@ -133,35 +138,62 @@ func (s *Service) MapLinksStream(ctx context.Context, req Request, out chan<- st
 			if !s.robots.IsAllowed(link, "SupacrawlerBot") {
 				return
 			}
+			// Check if link matches patterns
+			if !matchesPattern(link, req.Patterns) {
+				return
+			}
+
+			mu.Lock()
+			if limitReached {
+				mu.Unlock()
+				return
+			}
+
 			if _, exists := links[link]; !exists {
 				links[link] = struct{}{}
+				shouldVisit := e.Request.Depth < max(1, req.Depth)
+
+				// Check limit after adding
+				if req.LinkLimit > 0 && len(links) >= max(1, req.LinkLimit) {
+					limitReached = true
+					shouldVisit = false // Don't visit more if we hit limit
+				}
+				mu.Unlock()
+
+				// Channel send outside critical section
 				select {
 				case <-ctx.Done():
 					return
 				case out <- link:
 				}
-				if req.LinkLimit > 0 && len(links) >= max(1, req.LinkLimit) {
-					limitReached = true
-					return
-				}
-				if e.Request.Depth < max(1, req.Depth) {
+
+				if shouldVisit {
 					_ = e.Request.Visit(link)
 				}
+			} else {
+				mu.Unlock()
 			}
 		}
 	})
 
 	c.OnRequest(func(r *colly.Request) {
-		if limitReached {
+		// Quick check - single lock/unlock
+		mu.Lock()
+		reached := limitReached
+		mu.Unlock()
+
+		if reached {
 			r.Abort()
 			return
 		}
+
 		select {
 		case <-ctx.Done():
 			r.Abort()
 			return
 		default:
 		}
+
 		if !s.robots.IsAllowed(r.URL.String(), "SupacrawlerBot") {
 			r.Abort()
 			return
@@ -172,7 +204,10 @@ func (s *Service) MapLinksStream(ctx context.Context, req Request, out chan<- st
 		return fmt.Errorf("failed to visit URL: %w", err)
 	}
 	c.Wait()
-	s.log.LogSuccessf("Map stream done url=%s emitted=%d", req.URL, len(links))
+	mu.Lock()
+	linksCount := len(links)
+	mu.Unlock()
+	s.log.LogSuccessf("Map stream done url=%s emitted=%d", req.URL, linksCount)
 	return nil
 }
 
@@ -223,4 +258,44 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// matchesPattern checks if a URL matches any of the given patterns
+func matchesPattern(u string, patterns []string) bool {
+	if len(patterns) == 0 {
+		return true // If no patterns, allow all URLs
+	}
+
+	parsed, err := url.Parse(u)
+	if err != nil {
+		return false
+	}
+
+	path := parsed.Path
+	if path == "" {
+		path = "/"
+	}
+
+	for _, pattern := range patterns {
+		// Use filepath.Match for glob-style pattern matching
+		matched, err := filepath.Match(pattern, path)
+		if err == nil && matched {
+			return true
+		}
+
+		// Also check if pattern is a prefix (for patterns like "/blog/*")
+		if strings.HasSuffix(pattern, "*") {
+			prefix := strings.TrimSuffix(pattern, "*")
+			// Handle exact match (e.g., "/blog" matches "/blog/*")
+			if path == strings.TrimSuffix(prefix, "/") {
+				return true
+			}
+			// Handle prefix match (e.g., "/blog/post" matches "/blog/*")
+			if strings.HasPrefix(path, prefix) {
+				return true
+			}
+		}
+	}
+
+	return false
 }

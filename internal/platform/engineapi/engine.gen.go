@@ -22,12 +22,39 @@ const (
 	CrawlCreateRequestFormatMarkdown CrawlCreateRequestFormat = "markdown"
 )
 
+// Defines values for CrawlCreateRequestProxyMode.
+const (
+	CrawlCreateRequestProxyModeOff         CrawlCreateRequestProxyMode = "off"
+	CrawlCreateRequestProxyModeResidential CrawlCreateRequestProxyMode = "residential"
+	CrawlCreateRequestProxyModeSharedPool  CrawlCreateRequestProxyMode = "shared_pool"
+)
+
 // Defines values for CrawlStatusResponseStatus.
 const (
 	CrawlStatusResponseStatusCompleted  CrawlStatusResponseStatus = "completed"
 	CrawlStatusResponseStatusFailed     CrawlStatusResponseStatus = "failed"
 	CrawlStatusResponseStatusPending    CrawlStatusResponseStatus = "pending"
 	CrawlStatusResponseStatusProcessing CrawlStatusResponseStatus = "processing"
+)
+
+// Defines values for ParseCreateRequestOutputFormat.
+const (
+	ParseCreateRequestOutputFormatCsv      ParseCreateRequestOutputFormat = "csv"
+	ParseCreateRequestOutputFormatJson     ParseCreateRequestOutputFormat = "json"
+	ParseCreateRequestOutputFormatMarkdown ParseCreateRequestOutputFormat = "markdown"
+	ParseCreateRequestOutputFormatXml      ParseCreateRequestOutputFormat = "xml"
+	ParseCreateRequestOutputFormatYaml     ParseCreateRequestOutputFormat = "yaml"
+)
+
+// Defines values for ParseResponseWorkflowStatus.
+const (
+	ParseResponseWorkflowStatusAnalyzing  ParseResponseWorkflowStatus = "analyzing"
+	ParseResponseWorkflowStatusCompleted  ParseResponseWorkflowStatus = "completed"
+	ParseResponseWorkflowStatusCrawling   ParseResponseWorkflowStatus = "crawling"
+	ParseResponseWorkflowStatusExtracting ParseResponseWorkflowStatus = "extracting"
+	ParseResponseWorkflowStatusFailed     ParseResponseWorkflowStatus = "failed"
+	ParseResponseWorkflowStatusFormatting ParseResponseWorkflowStatus = "formatting"
+	ParseResponseWorkflowStatusScraping   ParseResponseWorkflowStatus = "scraping"
 )
 
 // Defines values for ScreenshotCreateRequestBlockResources.
@@ -70,9 +97,9 @@ const (
 
 // Defines values for ScreenshotJobResponseStatus.
 const (
-	Completed  ScreenshotJobResponseStatus = "completed"
-	Failed     ScreenshotJobResponseStatus = "failed"
-	Processing ScreenshotJobResponseStatus = "processing"
+	ScreenshotJobResponseStatusCompleted  ScreenshotJobResponseStatus = "completed"
+	ScreenshotJobResponseStatusFailed     ScreenshotJobResponseStatus = "failed"
+	ScreenshotJobResponseStatusProcessing ScreenshotJobResponseStatus = "processing"
 )
 
 // Defines values for ScreenshotJobResponseType.
@@ -82,26 +109,63 @@ const (
 
 // Defines values for GetV1ScrapeParamsFormat.
 const (
-	GetV1ScrapeParamsFormatLinks    GetV1ScrapeParamsFormat = "links"
-	GetV1ScrapeParamsFormatMarkdown GetV1ScrapeParamsFormat = "markdown"
+	Links    GetV1ScrapeParamsFormat = "links"
+	Markdown GetV1ScrapeParamsFormat = "markdown"
+)
+
+// Defines values for GetV1ScrapeParamsProxyMode.
+const (
+	GetV1ScrapeParamsProxyModeOff         GetV1ScrapeParamsProxyMode = "off"
+	GetV1ScrapeParamsProxyModeResidential GetV1ScrapeParamsProxyMode = "residential"
+	GetV1ScrapeParamsProxyModeSharedPool  GetV1ScrapeParamsProxyMode = "shared_pool"
 )
 
 // CrawlCreateRequest defines model for CrawlCreateRequest.
 type CrawlCreateRequest struct {
-	Depth  *int                      `json:"depth,omitempty"`
-	Format *CrawlCreateRequestFormat `json:"format,omitempty"`
+	Depth *int `json:"depth,omitempty"`
+
+	// EnableBotProtection Enable anti-bot detection and pivoting
+	EnableBotProtection *bool                     `json:"enable_bot_protection,omitempty"`
+	Format              *CrawlCreateRequestFormat `json:"format,omitempty"`
 
 	// Fresh Bypass cache and fetch fresh content
-	Fresh             *bool  `json:"fresh,omitempty"`
-	IncludeHtml       *bool  `json:"include_html,omitempty"`
-	IncludeSubdomains *bool  `json:"include_subdomains,omitempty"`
-	LinkLimit         *int   `json:"link_limit,omitempty"`
-	RenderJs          *bool  `json:"render_js,omitempty"`
-	Url               string `json:"url"`
+	Fresh             *bool `json:"fresh,omitempty"`
+	IncludeHtml       *bool `json:"include_html,omitempty"`
+	IncludeSubdomains *bool `json:"include_subdomains,omitempty"`
+	LinkLimit         *int  `json:"link_limit,omitempty"`
+
+	// MaxConsecutiveErrors Max consecutive errors before pivoting strategy
+	MaxConsecutiveErrors *int `json:"max_consecutive_errors,omitempty"`
+
+	// Patterns URL patterns to match (e.g., ["/blog/*", "/docs/*"])
+	Patterns *[]string `json:"patterns,omitempty"`
+
+	// ProxyMode Proxy rotation mode
+	ProxyMode *CrawlCreateRequestProxyMode `json:"proxy_mode,omitempty"`
+
+	// ProxyRegion ISO country code (e.g., "us", "eu", "gb")
+	ProxyRegion *string `json:"proxy_region,omitempty"`
+
+	// ProxySession Sticky session key for proxy consistency
+	ProxySession *string `json:"proxy_session,omitempty"`
+	RenderJs     *bool   `json:"render_js,omitempty"`
+
+	// RotateUserAgent Enable user agent rotation
+	RotateUserAgent *bool  `json:"rotate_user_agent,omitempty"`
+	Url             string `json:"url"`
+
+	// UserAgent Specific user agent to use (selected by backend)
+	UserAgent *string `json:"user_agent,omitempty"`
+
+	// WaitForSelectors CSS selectors to wait for before considering page loaded (for dynamic content)
+	WaitForSelectors *[]string `json:"wait_for_selectors,omitempty"`
 }
 
 // CrawlCreateRequestFormat defines model for CrawlCreateRequest.Format.
 type CrawlCreateRequestFormat string
+
+// CrawlCreateRequestProxyMode Proxy rotation mode
+type CrawlCreateRequestProxyMode string
 
 // CrawlCreateResponse defines model for CrawlCreateResponse.
 type CrawlCreateResponse struct {
@@ -145,8 +209,11 @@ type Error struct {
 
 // PageContent defines model for PageContent.
 type PageContent struct {
-	Markdown string       `json:"markdown"`
-	Html     *string      `json:"html,omitempty"`
+	Markdown string  `json:"markdown"`
+	Html     *string `json:"html,omitempty"`
+
+	// Links All discovered links on the page
+	Links    []string     `json:"links"`
 	Metadata PageMetadata `json:"metadata"`
 }
 
@@ -166,6 +233,80 @@ type PageMetadata struct {
 	TwitterDescription *string `json:"twitter_description,omitempty"`
 	TwitterImage       *string `json:"twitter_image,omitempty"`
 	TwitterTitle       *string `json:"twitter_title,omitempty"`
+}
+
+// ParseCreateRequest defines model for ParseCreateRequest.
+type ParseCreateRequest struct {
+	// MaxDepth Maximum crawl depth (if crawling is needed)
+	MaxDepth *int `json:"max_depth,omitempty"`
+
+	// MaxPages Maximum pages to process
+	MaxPages *int `json:"max_pages,omitempty"`
+
+	// OutputFormat Preferred output format
+	OutputFormat *ParseCreateRequestOutputFormat `json:"output_format,omitempty"`
+
+	// Prompt Natural language prompt that may include URLs and extraction instructions
+	Prompt string `json:"prompt"`
+
+	// Schema Optional JSON schema for structured output
+	Schema *map[string]interface{} `json:"schema,omitempty"`
+
+	// Stream Enable streaming responses for real-time results
+	Stream *bool `json:"stream,omitempty"`
+}
+
+// ParseCreateRequestOutputFormat Preferred output format
+type ParseCreateRequestOutputFormat string
+
+// ParseExamplesResponse defines model for ParseExamplesResponse.
+type ParseExamplesResponse struct {
+	// Examples Example output specifications
+	Examples map[string]map[string]interface{} `json:"examples"`
+	Success  bool                              `json:"success"`
+}
+
+// ParseResponse defines model for ParseResponse.
+type ParseResponse struct {
+	// Data Extracted data as JSON object, CSV string, or markdown
+	Data interface{} `json:"data,omitempty"`
+
+	// Error Error message if parsing failed
+	Error *string `json:"error,omitempty"`
+
+	// ExecutionTime Total execution time in milliseconds
+	ExecutionTime *int `json:"execution_time,omitempty"`
+
+	// PagesProcessed Number of pages processed so far
+	PagesProcessed *int `json:"pages_processed,omitempty"`
+
+	// PartialResults Incremental results for streaming responses
+	PartialResults *[]map[string]interface{} `json:"partial_results,omitempty"`
+
+	// Success Whether the parsing operation succeeded
+	Success bool `json:"success"`
+
+	// TotalPages Total pages discovered (if known)
+	TotalPages *int `json:"total_pages,omitempty"`
+
+	// WorkflowStatus Current workflow stage
+	WorkflowStatus *ParseResponseWorkflowStatus `json:"workflow_status,omitempty"`
+}
+
+// ParseResponseWorkflowStatus Current workflow stage
+type ParseResponseWorkflowStatus string
+
+// ParseTemplatesResponse defines model for ParseTemplatesResponse.
+type ParseTemplatesResponse struct {
+	// ContentTypes Supported content types
+	ContentTypes []string `json:"content_types"`
+
+	// OutputFormats Supported output formats
+	OutputFormats []string `json:"output_formats"`
+	Success       bool     `json:"success"`
+
+	// Templates Available templates with descriptions
+	Templates map[string]string `json:"templates"`
 }
 
 // ScrapeMetadata defines model for ScrapeMetadata.
@@ -190,12 +331,16 @@ type ScrapeMetadata struct {
 // ScrapeResponse defines model for ScrapeResponse.
 type ScrapeResponse struct {
 	// Content Markdown content or links depending on format
-	Content    *string `json:"content,omitempty"`
-	Discovered *int    `json:"discovered,omitempty"`
+	Content *string `json:"content,omitempty"`
+
+	// Discovered Number of links discovered
+	Discovered *int `json:"discovered,omitempty"`
 
 	// Html HTML content (only if include_html=true)
-	Html     *string        `json:"html,omitempty"`
-	Links    *[]string      `json:"links,omitempty"`
+	Html *string `json:"html,omitempty"`
+
+	// Links All discovered links on the page (always included)
+	Links    []string       `json:"links"`
 	Metadata ScrapeMetadata `json:"metadata"`
 	Success  bool           `json:"success"`
 	Title    *string        `json:"title,omitempty"`
@@ -318,17 +463,28 @@ type UnprocessableEntity = Error
 
 // GetV1ScrapeParams defines parameters for GetV1Scrape.
 type GetV1ScrapeParams struct {
-	Url         string                   `form:"url" json:"url"`
-	Format      *GetV1ScrapeParamsFormat `form:"format,omitempty" json:"format,omitempty"`
-	Depth       *int                     `form:"depth,omitempty" json:"depth,omitempty"`
-	MaxLinks    *int                     `form:"max_links,omitempty" json:"max_links,omitempty"`
-	RenderJs    *bool                    `form:"render_js,omitempty" json:"render_js,omitempty"`
-	IncludeHtml *bool                    `form:"include_html,omitempty" json:"include_html,omitempty"`
-	Fresh       *bool                    `form:"fresh,omitempty" json:"fresh,omitempty"`
+	Url                  string                      `form:"url" json:"url"`
+	Format               *GetV1ScrapeParamsFormat    `form:"format,omitempty" json:"format,omitempty"`
+	Depth                *int                        `form:"depth,omitempty" json:"depth,omitempty"`
+	MaxLinks             *int                        `form:"max_links,omitempty" json:"max_links,omitempty"`
+	RenderJs             *bool                       `form:"render_js,omitempty" json:"render_js,omitempty"`
+	IncludeHtml          *bool                       `form:"include_html,omitempty" json:"include_html,omitempty"`
+	Fresh                *bool                       `form:"fresh,omitempty" json:"fresh,omitempty"`
+	ProxyMode            *GetV1ScrapeParamsProxyMode `form:"proxy_mode,omitempty" json:"proxy_mode,omitempty"`
+	ProxyRegion          *string                     `form:"proxy_region,omitempty" json:"proxy_region,omitempty"`
+	ProxySession         *string                     `form:"proxy_session,omitempty" json:"proxy_session,omitempty"`
+	RotateUserAgent      *bool                       `form:"rotate_user_agent,omitempty" json:"rotate_user_agent,omitempty"`
+	EnableBotProtection  *bool                       `form:"enable_bot_protection,omitempty" json:"enable_bot_protection,omitempty"`
+	MaxConsecutiveErrors *int                        `form:"max_consecutive_errors,omitempty" json:"max_consecutive_errors,omitempty"`
+	UserAgent            *string                     `form:"user_agent,omitempty" json:"user_agent,omitempty"`
+	WaitForSelectors     *[]string                   `form:"wait_for_selectors,omitempty" json:"wait_for_selectors,omitempty"`
 }
 
 // GetV1ScrapeParamsFormat defines parameters for GetV1Scrape.
 type GetV1ScrapeParamsFormat string
+
+// GetV1ScrapeParamsProxyMode defines parameters for GetV1Scrape.
+type GetV1ScrapeParamsProxyMode string
 
 // GetV1ScreenshotsParams defines parameters for GetV1Screenshots.
 type GetV1ScreenshotsParams struct {
@@ -337,6 +493,9 @@ type GetV1ScreenshotsParams struct {
 
 // PostV1CrawlJSONRequestBody defines body for PostV1Crawl for application/json ContentType.
 type PostV1CrawlJSONRequestBody = CrawlCreateRequest
+
+// PostV1ParseJSONRequestBody defines body for PostV1Parse for application/json ContentType.
+type PostV1ParseJSONRequestBody = ParseCreateRequest
 
 // PostV1ScreenshotsJSONRequestBody defines body for PostV1Screenshots for application/json ContentType.
 type PostV1ScreenshotsJSONRequestBody = ScreenshotCreateRequest
@@ -425,6 +584,17 @@ type ClientInterface interface {
 	// GetV1CrawlJobId request
 	GetV1CrawlJobId(ctx context.Context, jobId string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// PostV1ParseWithBody request with any body
+	PostV1ParseWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	PostV1Parse(ctx context.Context, body PostV1ParseJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetV1ParseExamples request
+	GetV1ParseExamples(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetV1ParseTemplates request
+	GetV1ParseTemplates(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetV1Scrape request
 	GetV1Scrape(ctx context.Context, params *GetV1ScrapeParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -475,6 +645,54 @@ func (c *Client) PostV1Crawl(ctx context.Context, body PostV1CrawlJSONRequestBod
 
 func (c *Client) GetV1CrawlJobId(ctx context.Context, jobId string, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetV1CrawlJobIdRequest(c.Server, jobId)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostV1ParseWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV1ParseRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostV1Parse(ctx context.Context, body PostV1ParseJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV1ParseRequest(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetV1ParseExamples(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV1ParseExamplesRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetV1ParseTemplates(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV1ParseTemplatesRequest(c.Server)
 	if err != nil {
 		return nil, err
 	}
@@ -634,6 +852,100 @@ func NewGetV1CrawlJobIdRequest(server string, jobId string) (*http.Request, erro
 	return req, nil
 }
 
+// NewPostV1ParseRequest calls the generic PostV1Parse builder with application/json body
+func NewPostV1ParseRequest(server string, body PostV1ParseJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPostV1ParseRequestWithBody(server, "application/json", bodyReader)
+}
+
+// NewPostV1ParseRequestWithBody generates requests for PostV1Parse with any type of body
+func NewPostV1ParseRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v1/parse")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewGetV1ParseExamplesRequest generates requests for GetV1ParseExamples
+func NewGetV1ParseExamplesRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v1/parse/examples")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewGetV1ParseTemplatesRequest generates requests for GetV1ParseTemplates
+func NewGetV1ParseTemplatesRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v1/parse/templates")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewGetV1ScrapeRequest generates requests for GetV1Scrape
 func NewGetV1ScrapeRequest(server string, params *GetV1ScrapeParams) (*http.Request, error) {
 	var err error
@@ -751,6 +1063,134 @@ func NewGetV1ScrapeRequest(server string, params *GetV1ScrapeParams) (*http.Requ
 		if params.Fresh != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "fresh", runtime.ParamLocationQuery, *params.Fresh); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.ProxyMode != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "proxy_mode", runtime.ParamLocationQuery, *params.ProxyMode); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.ProxyRegion != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "proxy_region", runtime.ParamLocationQuery, *params.ProxyRegion); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.ProxySession != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "proxy_session", runtime.ParamLocationQuery, *params.ProxySession); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.RotateUserAgent != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "rotate_user_agent", runtime.ParamLocationQuery, *params.RotateUserAgent); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.EnableBotProtection != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "enable_bot_protection", runtime.ParamLocationQuery, *params.EnableBotProtection); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.MaxConsecutiveErrors != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "max_consecutive_errors", runtime.ParamLocationQuery, *params.MaxConsecutiveErrors); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.UserAgent != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "user_agent", runtime.ParamLocationQuery, *params.UserAgent); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.WaitForSelectors != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "wait_for_selectors", runtime.ParamLocationQuery, *params.WaitForSelectors); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err
@@ -914,6 +1354,17 @@ type ClientWithResponsesInterface interface {
 	// GetV1CrawlJobIdWithResponse request
 	GetV1CrawlJobIdWithResponse(ctx context.Context, jobId string, reqEditors ...RequestEditorFn) (*GetV1CrawlJobIdResponse, error)
 
+	// PostV1ParseWithBodyWithResponse request with any body
+	PostV1ParseWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV1ParseResponse, error)
+
+	PostV1ParseWithResponse(ctx context.Context, body PostV1ParseJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV1ParseResponse, error)
+
+	// GetV1ParseExamplesWithResponse request
+	GetV1ParseExamplesWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetV1ParseExamplesResponse, error)
+
+	// GetV1ParseTemplatesWithResponse request
+	GetV1ParseTemplatesWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetV1ParseTemplatesResponse, error)
+
 	// GetV1ScrapeWithResponse request
 	GetV1ScrapeWithResponse(ctx context.Context, params *GetV1ScrapeParams, reqEditors ...RequestEditorFn) (*GetV1ScrapeResponse, error)
 
@@ -987,6 +1438,75 @@ func (r GetV1CrawlJobIdResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r GetV1CrawlJobIdResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type PostV1ParseResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *ParseResponse
+	JSON400      *BadRequest
+	JSON422      *UnprocessableEntity
+	JSON500      *InternalError
+}
+
+// Status returns HTTPResponse.Status
+func (r PostV1ParseResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PostV1ParseResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetV1ParseExamplesResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *ParseExamplesResponse
+}
+
+// Status returns HTTPResponse.Status
+func (r GetV1ParseExamplesResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetV1ParseExamplesResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetV1ParseTemplatesResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *ParseTemplatesResponse
+}
+
+// Status returns HTTPResponse.Status
+func (r GetV1ParseTemplatesResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetV1ParseTemplatesResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -1103,6 +1623,41 @@ func (c *ClientWithResponses) GetV1CrawlJobIdWithResponse(ctx context.Context, j
 	return ParseGetV1CrawlJobIdResponse(rsp)
 }
 
+// PostV1ParseWithBodyWithResponse request with arbitrary body returning *PostV1ParseResponse
+func (c *ClientWithResponses) PostV1ParseWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV1ParseResponse, error) {
+	rsp, err := c.PostV1ParseWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostV1ParseResponse(rsp)
+}
+
+func (c *ClientWithResponses) PostV1ParseWithResponse(ctx context.Context, body PostV1ParseJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV1ParseResponse, error) {
+	rsp, err := c.PostV1Parse(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostV1ParseResponse(rsp)
+}
+
+// GetV1ParseExamplesWithResponse request returning *GetV1ParseExamplesResponse
+func (c *ClientWithResponses) GetV1ParseExamplesWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetV1ParseExamplesResponse, error) {
+	rsp, err := c.GetV1ParseExamples(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetV1ParseExamplesResponse(rsp)
+}
+
+// GetV1ParseTemplatesWithResponse request returning *GetV1ParseTemplatesResponse
+func (c *ClientWithResponses) GetV1ParseTemplatesWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetV1ParseTemplatesResponse, error) {
+	rsp, err := c.GetV1ParseTemplates(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetV1ParseTemplatesResponse(rsp)
+}
+
 // GetV1ScrapeWithResponse request returning *GetV1ScrapeResponse
 func (c *ClientWithResponses) GetV1ScrapeWithResponse(ctx context.Context, params *GetV1ScrapeParams, reqEditors ...RequestEditorFn) (*GetV1ScrapeResponse, error) {
 	rsp, err := c.GetV1Scrape(ctx, params, reqEditors...)
@@ -1214,6 +1769,105 @@ func ParseGetV1CrawlJobIdResponse(rsp *http.Response) (*GetV1CrawlJobIdResponse,
 			return nil, err
 		}
 		response.JSON404 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePostV1ParseResponse parses an HTTP response from a PostV1ParseWithResponse call
+func ParsePostV1ParseResponse(rsp *http.Response) (*PostV1ParseResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PostV1ParseResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ParseResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest BadRequest
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest UnprocessableEntity
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest InternalError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON500 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetV1ParseExamplesResponse parses an HTTP response from a GetV1ParseExamplesWithResponse call
+func ParseGetV1ParseExamplesResponse(rsp *http.Response) (*GetV1ParseExamplesResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetV1ParseExamplesResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ParseExamplesResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetV1ParseTemplatesResponse parses an HTTP response from a GetV1ParseTemplatesWithResponse call
+func ParseGetV1ParseTemplatesResponse(rsp *http.Response) (*GetV1ParseTemplatesResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetV1ParseTemplatesResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ParseTemplatesResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
 
 	}
 
