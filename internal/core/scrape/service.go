@@ -1116,9 +1116,9 @@ func (s *Service) hasSignificantContentChange(initial, final *ContentSignature, 
 	}
 
 	if hasChange {
-		s.log.LogSuccessf("✅ JS rendered new content: %s", strings.Join(reasons, ", "))
+		s.log.LogSuccessf("JS rendered new content: %s", strings.Join(reasons, ", "))
 	} else {
-		s.log.LogWarnf("❌ No significant content change detected")
+		s.log.LogWarnf("No significant content change detected")
 	}
 
 	return hasChange

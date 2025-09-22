@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 )
 
 type Config struct {
@@ -16,11 +17,12 @@ type Config struct {
 	SupabaseServiceKey string
 	SupabaseBucket     string
 
-	// LLM / Eino configuration (engine-owned)
 	LLMProvider      string
 	GeminiAPIKey     string
 	DefaultLLMModel  string
 	FallbackLLMModel string
+
+	TaskMaxRetries int
 }
 
 func getenv(key, def string) string {
@@ -29,6 +31,18 @@ func getenv(key, def string) string {
 		return def
 	}
 	return v
+}
+
+func getenvInt(key string, def int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	i, err := strconv.Atoi(v)
+	if err != nil {
+		return def
+	}
+	return i
 }
 
 func Load() Config {
@@ -47,6 +61,8 @@ func Load() Config {
 		GeminiAPIKey:     os.Getenv("GEMINI_API_KEY"),
 		DefaultLLMModel:  getenv("DEFAULT_LLM_MODEL", "gemini-1.5-flash"),
 		FallbackLLMModel: getenv("FALLBACK_LLM_MODEL", "gemini-1.5-pro"),
+
+		TaskMaxRetries: getenvInt("TASK_MAX_RETRIES", 3),
 	}
 	if cfg.RedisAddr == "" {
 		panic(fmt.Errorf("REDIS_ADDR is required"))

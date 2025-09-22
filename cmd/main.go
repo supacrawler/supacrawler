@@ -56,7 +56,7 @@ func main() {
 	jobSvc := job.NewJobService(redisSvc)
 	mapSvc := mapper.NewMapService()
 	scrapeSvc := scrape.NewScrapeService(redisSvc)
-	crawlSvc := crawl.NewCrawlService(jobSvc, taskClient, mapSvc, scrapeSvc)
+	crawlSvc := crawl.NewCrawlService(jobSvc, taskClient, mapSvc, scrapeSvc, cfg)
 	screenshotSvc, err := screenshot.New(cfg, jobSvc)
 	if err != nil {
 		log.Fatal(err)
@@ -79,7 +79,7 @@ func main() {
 
 	// Worker mux
 	mux := worker.NewMux()
-	mux.HandleFunc(crawl.TaskTypeCrawl, crawlSvc.HandleCrawlTask)
+	mux.HandleFunc(tasks.TaskTypeCrawl, crawlSvc.HandleCrawlTask)
 	mux.HandleFunc(screenshot.TaskTypeScreenshot, screenshotSvc.HandleTask)
 
 	// Start worker

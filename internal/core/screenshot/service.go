@@ -76,7 +76,7 @@ func (s *Service) Enqueue(ctx context.Context, t *tasks.Client, req Request) (st
 		return "", err
 	}
 	task := asynq.NewTask(TaskTypeScreenshot, payload)
-	if err := t.Enqueue(task, "default", 10); err != nil {
+	if err := t.Enqueue(task, "default", s.cfg.TaskMaxRetries); err != nil {
 		return "", err
 	}
 	return jobID, nil

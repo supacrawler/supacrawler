@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"scraper/internal/config"
 	"scraper/internal/core/job"
 	"scraper/internal/core/mapper"
 	"scraper/internal/core/scrape"
@@ -21,18 +22,17 @@ import (
 	"github.com/hibiken/asynq"
 )
 
-const TaskTypeCrawl = "crawl:task"
-
 type CrawlService struct {
 	job    *job.JobService
 	tasks  *tasks.Client
 	mapper *mapper.Service
 	scrape *scrape.Service
 	log    *logger.Logger
+	config config.Config
 }
 
-func NewCrawlService(job *job.JobService, tasks *tasks.Client, mapper *mapper.Service, scrape *scrape.Service) *CrawlService {
-	return &CrawlService{job: job, tasks: tasks, mapper: mapper, scrape: scrape, log: logger.New("CrawlService")}
+func NewCrawlService(job *job.JobService, tasks *tasks.Client, mapper *mapper.Service, scrape *scrape.Service, cfg config.Config) *CrawlService {
+	return &CrawlService{job: job, tasks: tasks, mapper: mapper, scrape: scrape, log: logger.New("CrawlService"), config: cfg}
 }
 
 // StreamCrawlToChannel performs streaming crawl and publishes each page to the provided channel
@@ -165,11 +165,11 @@ func (s *CrawlService) StreamCrawlToChannel(ctx context.Context, req engineapi.C
 		s.log.LogDebugf("Checking fallback conditions: mapperFound=%d < 3 AND linkLimit=%d > 3 = %v",
 			mapperFoundLinks, linkLimit, mapperFoundLinks < 3 && linkLimit > 3)
 		if mapperFoundLinks < 3 && linkLimit > 3 {
-			s.log.LogInfof("🔄 Mapper found only %d links, trying scrape service fallback for dynamic content", mapperFoundLinks)
+			s.log.LogInfof("Mapper found only %d links, trying scrape service fallback for dynamic content", mapperFoundLinks)
 
 			// Use scrape service to get links from the main page
 			if additionalLinks := s.getLinks(streamCtx, req.Url, renderJs, userAgent, waitSelectors); len(additionalLinks) > 0 {
-				s.log.LogInfof("📦 Scrape service found %d additional links", len(additionalLinks))
+				s.log.LogInfof("Scrape service found %d additional links", len(additionalLinks))
 
 				// Filter and add additional links
 				for _, link := range additionalLinks {
@@ -351,8 +351,8 @@ func (s *CrawlService) Enqueue(ctx context.Context, req engineapi.CrawlCreateReq
 	if err := s.job.InitPending(ctx, id, job.TypeCrawl, req.Url); err != nil {
 		return "", err
 	}
-	task := asynq.NewTask(TaskTypeCrawl, payload)
-	if err := s.tasks.Enqueue(task, "default", 10); err != nil {
+	task := asynq.NewTask(tasks.TaskTypeCrawl, payload)
+	if err := s.tasks.Enqueue(task, "default", s.config.TaskMaxRetries); err != nil {
 		return "", err
 	}
 	s.log.LogInfof("enqueued crawl job %s for %s with max pages %d", id, req.Url, req.LinkLimit)

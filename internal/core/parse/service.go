@@ -24,7 +24,7 @@ import (
 	orderedmap "github.com/wk8/go-ordered-map/v2"
 )
 
-// StreamTestMode enables mock streaming without calling the LLM
+// StreamTestMode enables development mode with sample data
 var StreamTestMode = false
 
 // Service implements intelligent parsing using Eino workflows with streaming
@@ -341,6 +341,22 @@ func (s *Service) ProcessWithWorkflow(ctx context.Context, req engineapi.ParseCr
 		WorkflowStatus: (*engineapi.ParseResponseWorkflowStatus)(&workflowStatus),
 	}
 
+	// Add token usage data from workflow result
+	if result.TokenUsage != nil {
+		inputTokens := int(result.TokenUsage.InputTokens)
+		outputTokens := int(result.TokenUsage.OutputTokens)
+		totalTokens := int(result.TokenUsage.TotalTokens)
+		pagesProcessed := result.TokenUsage.PagesProcessed
+
+		response.InputTokens = &inputTokens
+		response.OutputTokens = &outputTokens
+		response.TotalTokens = &totalTokens
+		response.PagesProcessed = &pagesProcessed
+
+		s.log.LogInfof("[parse] Token usage: input=%d, output=%d, total=%d, pages=%d",
+			inputTokens, outputTokens, totalTokens, pagesProcessed)
+	}
+
 	if len(result.Errors) > 0 {
 		errorMsg := strings.Join(result.Errors, "; ")
 		response.Error = &errorMsg
@@ -359,7 +375,6 @@ func (s *Service) analyzePromptNode(ctx context.Context, input *ParseInput) (map
 
 	req := input.Request
 
-	// Test mode: return mock analysis
 	if StreamTestMode {
 		time.Sleep(500 * time.Millisecond)
 		analysis := &PromptAnalysis{
@@ -369,7 +384,17 @@ func (s *Service) analyzePromptNode(ctx context.Context, input *ParseInput) (map
 			MaxPages:       1,
 			ExtractionGoal: "Extract article titles, authors, published dates, summaries, and tags from blog posts",
 		}
-		return map[string]interface{}{"analysis": analysis}, nil
+
+		workflowCtx := &WorkflowContext{
+			TotalInputTokens:  45000,
+			TotalOutputTokens: 12000,
+			PagesProcessed:    0,
+		}
+
+		return map[string]interface{}{
+			"analysis":         analysis,
+			"workflow_context": workflowCtx,
+		}, nil
 	}
 
 	// Prepare template variables for structured prompt
@@ -550,7 +575,7 @@ func (s *Service) processAndAggregateNode(ctx context.Context, input map[string]
 		}
 
 		pageCount++
-		s.log.LogInfof("🔄 Processing page %d: %s", pageCount, pageData.URL)
+		s.log.LogInfof("Processing page %d: %s", pageCount, pageData.URL)
 
 		if pageData.Error != "" {
 			s.log.LogWarnf("Page %d has error: %s", pageCount, pageData.Error)
@@ -573,7 +598,7 @@ func (s *Service) processAndAggregateNode(ctx context.Context, input map[string]
 		}
 
 		workflowCtx.PagesProcessed++
-		s.log.LogInfof("✅ Collected raw content from page %d (%d chars)", pageCount, len(rawContent))
+		s.log.LogInfof("Collected raw content from page %d (%d chars)", pageCount, len(rawContent))
 
 		// Add to raw content list
 		rawContentList = append(rawContentList, RawContentItem{
@@ -581,15 +606,15 @@ func (s *Service) processAndAggregateNode(ctx context.Context, input map[string]
 			Content: rawContent,
 		})
 
-		// 🔍 LOG: Preview of content being collected for debugging
+		// Preview of content being collected for debugging
 		preview := rawContent
 		if len(preview) > 200 {
 			preview = preview[:200] + "..."
 		}
-		s.log.LogInfof("📄 Page %d content preview: %s", pageCount, preview)
+		s.log.LogInfof("Page %d content preview: %s", pageCount, preview)
 	}
 
-	s.log.LogInfof("📊 Content collection summary: %d pages collected, %d errors", len(rawContentList), len(errors))
+	s.log.LogInfof("Content collection summary: %d pages collected, %d errors", len(rawContentList), len(errors))
 
 	// Essential progress: aggregating results
 	s.publishProgressEvent(ctx, "parse.aggregating", "Processing collected content with LLM...")
@@ -627,8 +652,17 @@ func (s *Service) processAndAggregateNode(ctx context.Context, input map[string]
 			}
 		} else {
 			finalData = extractedData
-			finalTokenUsage = tokenUsage
-			s.log.LogInfof("🎉 Unified LLM processing completed successfully - processed %d pages", len(rawContentList))
+			// Aggregate tokens from analysis step + content processing step
+			finalTokenUsage = &TokenUsage{
+				InputTokens:    workflowCtx.TotalInputTokens + tokenUsage.InputTokens,
+				OutputTokens:   workflowCtx.TotalOutputTokens + tokenUsage.OutputTokens,
+				TotalTokens:    (workflowCtx.TotalInputTokens + tokenUsage.InputTokens) + (workflowCtx.TotalOutputTokens + tokenUsage.OutputTokens),
+				PagesProcessed: tokenUsage.PagesProcessed,
+			}
+			s.log.LogInfof("Total token usage: analysis(%d+%d) + content(%d+%d) = %d total tokens",
+				workflowCtx.TotalInputTokens, workflowCtx.TotalOutputTokens,
+				tokenUsage.InputTokens, tokenUsage.OutputTokens,
+				finalTokenUsage.TotalTokens)
 		}
 	}
 
@@ -647,6 +681,48 @@ func (s *Service) processAllContentWithUnifiedLLM(ctx context.Context, rawConten
 		return []interface{}{}, &TokenUsage{}, nil
 	}
 
+	if StreamTestMode {
+		time.Sleep(800 * time.Millisecond)
+
+		demoData := []map[string]interface{}{
+			{
+				"title":   "Building Better Web Scrapers",
+				"author":  "John Doe",
+				"date":    "2024-01-15",
+				"summary": "Learn how to build efficient and reliable web scrapers using modern techniques.",
+				"tags":    []string{"web-scraping", "automation", "data"},
+				"url":     "https://supacrawler.com/blog/building-better-scrapers",
+			},
+			{
+				"title":   "Advanced Crawling Strategies",
+				"author":  "Jane Smith",
+				"date":    "2024-01-10",
+				"summary": "Deep dive into advanced techniques for crawling large websites efficiently.",
+				"tags":    []string{"crawling", "performance", "scaling"},
+				"url":     "https://supacrawler.com/blog/advanced-crawling",
+			},
+		}
+
+		totalInputChars := 0
+		for _, item := range rawContentList {
+			totalInputChars += len(item.Content)
+		}
+
+		inputTokens := int32(totalInputChars/4 + 200)
+		outputTokens := int32(450)
+
+		tokenUsage := &TokenUsage{
+			InputTokens:    inputTokens,
+			OutputTokens:   outputTokens,
+			TotalTokens:    inputTokens + outputTokens,
+			PagesProcessed: len(rawContentList),
+		}
+
+		s.log.LogInfof("Development mode: Returning sample data for %d pages", len(rawContentList))
+
+		return demoData, tokenUsage, nil
+	}
+
 	// Prepare content for LLM processing
 	var contentBuilder strings.Builder
 	operationType := "scrape"
@@ -660,9 +736,9 @@ func (s *Service) processAllContentWithUnifiedLLM(ctx context.Context, rawConten
 	}
 
 	// Build combined content for LLM
-	s.log.LogInfof("🔗 Building unified content from %d sources for LLM processing", len(rawContentList))
+	s.log.LogInfof("Building unified content from %d sources for LLM processing", len(rawContentList))
 	for i, item := range rawContentList {
-		s.log.LogInfof("📋 Source %d: %s (%d chars)", i+1, item.URL, len(item.Content))
+		s.log.LogInfof("Source %d: %s (%d chars)", i+1, item.URL, len(item.Content))
 		contentBuilder.WriteString(fmt.Sprintf("=== SOURCE %d: %s ===\n", i+1, item.URL))
 		contentBuilder.WriteString(item.Content)
 		contentBuilder.WriteString("\n\n")
@@ -682,7 +758,7 @@ func (s *Service) processAllContentWithUnifiedLLM(ctx context.Context, rawConten
 			if len(line2) > 50 {
 				line2 = line2[:50]
 			}
-			s.log.LogInfof("📄 Source %d preview: %s | %s | %s...", i+1, line0, line1, line2)
+			s.log.LogInfof("Source %d preview: %s | %s | %s", i+1, line0, line1, line2)
 		}
 	}
 
@@ -725,7 +801,7 @@ func (s *Service) processAllContentWithUnifiedLLM(ctx context.Context, rawConten
 		},
 	}
 
-	s.log.LogInfof("🔧 Enforcing JSON schema for aggregation output")
+	s.log.LogInfof("Enforcing JSON schema for aggregation output")
 
 	// Call LLM with token tracking and JSON schema enforcement
 	response, tokenUsage, err := s.eino.GenerateWithTokenUsage(ctx, messages,
@@ -758,11 +834,11 @@ func (s *Service) processAllContentWithUnifiedLLM(ctx context.Context, rawConten
 
 // analyzeExtractedData provides detailed logging of extracted data for debugging
 func (s *Service) analyzeExtractedData(data interface{}, numSources int) {
-	s.log.LogInfof("🔍 EXTRACTED DATA ANALYSIS from %d sources:", numSources)
+	s.log.LogInfof("Extracted data analysis from %d sources:", numSources)
 
 	switch v := data.(type) {
 	case []interface{}:
-		s.log.LogInfof("📊 Result type: Array with %d items", len(v))
+		s.log.LogInfof("Result type: Array with %d items", len(v))
 
 		// Track titles for duplicate detection
 		titlesSeen := make(map[string]int)
@@ -791,9 +867,9 @@ func (s *Service) analyzeExtractedData(data interface{}, numSources int) {
 				// Track duplicates
 				titlesSeen[title]++
 
-				s.log.LogInfof("📄 Item %d: Title='%s', Author='%s'", i+1, title, author)
+				s.log.LogInfof("Item %d: Title='%s', Author='%s'", i+1, title, author)
 			} else {
-				s.log.LogInfof("📄 Item %d: %v", i+1, item)
+				s.log.LogInfof("Item %d: %v", i+1, item)
 			}
 		}
 
@@ -801,41 +877,38 @@ func (s *Service) analyzeExtractedData(data interface{}, numSources int) {
 		duplicates := 0
 		for title, count := range titlesSeen {
 			if count > 1 {
-				s.log.LogWarnf("🔄 DUPLICATE detected: '%s' appears %d times", title, count)
+				s.log.LogWarnf("Duplicate detected: '%s' appears %d times", title, count)
 				duplicates++
 			}
 		}
 
 		if duplicates == 0 {
-			s.log.LogInfof("✅ NO DUPLICATES detected - all %d items are unique", len(v))
+			s.log.LogInfof("No duplicates detected - all %d items are unique", len(v))
 		} else {
-			s.log.LogWarnf("⚠️ Found %d duplicate titles", duplicates)
+			s.log.LogWarnf("Found %d duplicate titles", duplicates)
 		}
 
 	case map[string]interface{}:
-		s.log.LogInfof("📊 Result type: Object with %d fields", len(v))
+		s.log.LogInfof("Result type: Object with %d fields", len(v))
 		for key, value := range v {
-			s.log.LogInfof("📋 Field '%s': %v", key, value)
+			s.log.LogInfof("Field '%s': %v", key, value)
 		}
 
 	default:
-		s.log.LogInfof("📊 Result type: %T - %v", data, data)
+		s.log.LogInfof("Result type: %T - %v", data, data)
 	}
 }
 
 func (s *Service) parseAndCleanLLMResponse(response string) (interface{}, error) {
-	// Clean the response string first
 	cleaned := s.cleanJSONString(response)
 
-	// Convert to string if needed
 	var cleanedStr string
 	if str, ok := cleaned.(string); ok {
 		cleanedStr = str
 	} else {
-		cleanedStr = response // fallback to original
+		cleanedStr = response
 	}
 
-	// Try to parse as JSON
 	var result interface{}
 	if err := json.Unmarshal([]byte(cleanedStr), &result); err != nil {
 		return nil, fmt.Errorf("JSON parsing failed: %w", err)
@@ -926,14 +999,11 @@ func (s *Service) streamScrapeContent(ctx context.Context, analysis PromptAnalys
 			continue
 		}
 
-		// Use scrape service with smart bot detection
 		format := engineapi.GetV1ScrapeParamsFormat("markdown")
 		params := engineapi.GetV1ScrapeParams{
 			Url:    url,
 			Format: &format,
 		}
-
-		// Bot protection can be enabled via request parameters from backend
 
 		result, err := s.scrapeService.ScrapeURL(ctx, params)
 		if err != nil {
@@ -1039,20 +1109,18 @@ func (s *Service) streamCrawlContent(ctx context.Context, analysis PromptAnalysi
 				PageContent: pageResult.PageContent,
 			}
 
-			s.log.LogDebugf("📝 Forwarding raw content from: %s", pageResult.URL)
+			s.log.LogDebugf("Forwarding raw content from: %s", pageResult.URL)
 			writer.Send(pageData, nil)
 		}
 	}
 
-	// Wait for content forwarding to complete (no LLM processing here)
-	s.log.LogInfof("Waiting for %d content items to be forwarded...", successfulPages)
 	wg.Wait()
 	s.log.LogInfof("Crawl completed: %d total pages, %d successful (raw content forwarded)", totalPages, successfulPages)
 }
 
 // fallbackPromptAnalysis provides regex-based analysis when LLM fails
 func (s *Service) fallbackPromptAnalysis(req engineapi.ParseCreateRequest) *PromptAnalysis {
-	// Extract URLs using regex - more flexible pattern
+	// Extract URLs using regex
 	urlRegex := regexp.MustCompile(`(?:https?://)?[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?:/[^\s]*)?`)
 	urls := urlRegex.FindAllString(req.Prompt, -1)
 
@@ -1098,8 +1166,6 @@ func (s *Service) fallbackPromptAnalysis(req engineapi.ParseCreateRequest) *Prom
 		Schema:         schema,
 	}
 }
-
-// Legacy compatibility methods for handler
 
 func (s *Service) GetAvailableTemplates() map[string]string {
 	return map[string]string{
@@ -1147,7 +1213,6 @@ func (s *Service) GetExampleOutputSpecs() map[string]map[string]interface{} {
 func (s *Service) publishProgressEvent(ctx context.Context, event, message string) {
 	// Only publish essential user progress events, not internal Eino workflow noise
 	if tracer, ok := ctx.Value("eino_tracer").(*EinoTracer); ok && tracer != nil {
-		// Only map specific essential events
 		var step string
 		switch event {
 		case "parse.analyzing":
@@ -1157,7 +1222,6 @@ func (s *Service) publishProgressEvent(ctx context.Context, event, message strin
 		case "parse.aggregating":
 			step = "aggregate_results"
 		default:
-			// Skip all other events (no internal Eino noise)
 			return
 		}
 
@@ -1175,30 +1239,4 @@ func (s *Service) publishProgressEvent(ctx context.Context, event, message strin
 	if StreamTestMode {
 		time.Sleep(300 * time.Millisecond)
 	}
-}
-
-// repairTruncatedJSON tries to close a clearly truncated object/array
-func repairTruncatedJSON(s string) string {
-	s = strings.TrimSpace(s)
-	// If it's an array missing the closing ']', add it
-	if strings.HasPrefix(s, "[") && !strings.HasSuffix(s, "]") {
-		return s + "]"
-	}
-	// If it's an object missing the closing '}', add it
-	if strings.HasPrefix(s, "{") && !strings.HasSuffix(s, "}") {
-		return s + "}"
-	}
-	return s
-}
-
-// mustMarshalJSON marshals data to JSON, returning empty string on error
-func mustMarshalJSON(data interface{}) string {
-	if data == nil {
-		return ""
-	}
-	bytes, err := json.Marshal(data)
-	if err != nil {
-		return ""
-	}
-	return string(bytes)
 }

@@ -6,6 +6,10 @@ import (
 	"github.com/hibiken/asynq"
 )
 
+const (
+	TaskTypeCrawl = "crawl:task"
+)
+
 type Client struct{ c *asynq.Client }
 
 func New(r *redis.Service) *Client { return &Client{c: asynq.NewClient(r.AsynqRedisOpt())} }
