@@ -707,8 +707,7 @@ func (s *Service) isValidResult(res *engineapi.ScrapeResponse) bool {
 		sc = *res.Metadata.StatusCode
 	}
 
-	// Basic filters
-	if sc == 404 || sc == 403 {
+	if sc == 404 {
 		return false
 	}
 	if len(content) < 10 {

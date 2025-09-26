@@ -429,6 +429,15 @@ components:
           items:
             type: string
           description: CSS selectors to wait for before considering page loaded (for dynamic content)
+        webhook_url:
+          type: string
+          format: uri
+          description: Optional webhook URL to notify when job completes
+        webhook_headers:
+          type: object
+          additionalProperties:
+            type: string
+          description: Optional HTTP headers to include in webhook requests
       required: [url]
 
     CrawlCreateResponse:

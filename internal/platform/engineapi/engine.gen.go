@@ -159,6 +159,12 @@ type CrawlCreateRequest struct {
 
 	// WaitForSelectors CSS selectors to wait for before considering page loaded (for dynamic content)
 	WaitForSelectors *[]string `json:"wait_for_selectors,omitempty"`
+
+	// WebhookHeaders Optional HTTP headers to include in webhook requests
+	WebhookHeaders *map[string]string `json:"webhook_headers,omitempty"`
+
+	// WebhookUrl Optional webhook URL to notify when job completes
+	WebhookUrl *string `json:"webhook_url,omitempty"`
 }
 
 // CrawlCreateRequestFormat defines model for CrawlCreateRequest.Format.

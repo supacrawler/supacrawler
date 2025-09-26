@@ -1,10 +1,16 @@
 package crawl
 
 import (
+	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"net/http"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -403,7 +409,18 @@ func (s *CrawlService) HandleCrawlTask(ctx context.Context, task *asynq.Task) er
 	}
 
 	s.log.LogInfof("completing crawl job %s: success=%d failed=%d total=%d (target was %d)", p.JobID, derefInt(st.SuccessfulPages), derefInt(st.FailedPages), derefInt(st.TotalPages), derefInt(p.Request.LinkLimit))
-	return s.job.Complete(ctx, p.JobID, job.TypeCrawl, job.StatusCompleted, data)
+
+	// Complete in Redis first
+	if err := s.job.Complete(ctx, p.JobID, job.TypeCrawl, job.StatusCompleted, data); err != nil {
+		return err
+	}
+
+	// Send webhook notification if webhook URL is provided
+	if p.Request.WebhookUrl != nil && *p.Request.WebhookUrl != "" {
+		s.sendWebhookNotification(ctx, p.JobID, "completed", data, *p.Request.WebhookUrl, p.Request.WebhookHeaders)
+	}
+
+	return nil
 }
 
 // streamCrawl performs streamed mapping + scraping with a worker pool and strict link limit handling
@@ -814,4 +831,84 @@ func matchesPattern(u string, patterns []string) bool {
 	}
 
 	return false
+}
+
+// sendWebhookNotification sends a webhook notification to the provided URL
+func (s *CrawlService) sendWebhookNotification(ctx context.Context, jobID, status string, data engineapi.CrawlJobData, webhookURL string, headers *map[string]string) {
+	s.log.LogInfof("Sending webhook notification for job %s to %s", jobID, webhookURL)
+
+	// Prepare webhook payload
+	payload := map[string]interface{}{
+		"job_id": jobID,
+		"type":   "crawl",
+		"status": status,
+		"data":   data,
+	}
+
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		s.log.LogErrorf("Failed to marshal webhook payload for job %s: %v", jobID, err)
+		return
+	}
+
+	// Create HTTP request
+	req, err := http.NewRequestWithContext(ctx, "POST", webhookURL, bytes.NewBuffer(payloadBytes))
+	if err != nil {
+		s.log.LogErrorf("Failed to create webhook request for job %s: %v", jobID, err)
+		return
+	}
+
+	// Set default headers
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "Supacrawler-Engine/1.0")
+	req.Header.Set("X-Supacrawler-Event", "crawl.completed")
+	req.Header.Set("X-Supacrawler-Job-ID", jobID)
+
+	// Add HMAC authentication headers for system auth
+	if s.config.SystemAuthSecret != "" {
+		timestamp := strconv.FormatInt(time.Now().Unix(), 10)
+		signature := s.generateHMACSignature(timestamp, payloadBytes)
+
+		req.Header.Set("X-System-Timestamp", timestamp)
+		req.Header.Set("X-System-Signature", signature)
+		s.log.LogDebugf("Added HMAC auth headers for webhook: timestamp=%s", timestamp)
+	} else {
+		s.log.LogWarnf("System auth secret not configured, webhook may fail authentication")
+	}
+
+	// Add custom headers if provided
+	if headers != nil {
+		for key, value := range *headers {
+			req.Header.Set(key, value)
+		}
+	}
+
+	// Send request with timeout
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		s.log.LogWarnf("Failed to send webhook for job %s to %s: %v", jobID, webhookURL, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		s.log.LogInfof("Successfully sent webhook for job %s to %s (status: %d)", jobID, webhookURL, resp.StatusCode)
+	} else {
+		s.log.LogWarnf("Webhook returned status %d for job %s to %s", resp.StatusCode, jobID, webhookURL)
+	}
+}
+
+// generateHMACSignature creates HMAC signature for system authentication
+func (s *CrawlService) generateHMACSignature(timestamp string, payload []byte) string {
+	// Create payload: timestamp + body (same format as backend expects)
+	signaturePayload := timestamp + string(payload)
+
+	// Calculate HMAC
+	h := hmac.New(sha256.New, []byte(s.config.SystemAuthSecret))
+	h.Write([]byte(signaturePayload))
+	signature := hex.EncodeToString(h.Sum(nil))
+
+	s.log.LogDebugf("Generated HMAC signature for payload length %d", len(signaturePayload))
+	return signature
 }
