@@ -39,6 +39,7 @@ func RegisterRoutes(app *fiber.App, d Dependencies) *health.HealthHandler {
 	api.Post("/parse", parseHandler.HandleParseContent)
 	api.Get("/parse/templates", parseHandler.HandleGetTemplates)
 	api.Get("/parse/examples", parseHandler.HandleGetExamples)
+	api.Get("/parse/:jobId", parseHandler.HandleGetStatus)
 
 	crawlHandler := crawl.NewCrawlHandler(d.Job, d.Crawl)
 	api.Post("/crawl", crawlHandler.HandleCreateCrawl)

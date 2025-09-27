@@ -67,6 +67,23 @@ func (h *Handler) HandleParseContent(c *fiber.Ctx) error {
 	return c.JSON(result)
 }
 
+// HandleGetStatus handles GET /v1/parse/:id requests
+func (h *Handler) HandleGetStatus(c *fiber.Ctx) error {
+	id := c.Params("id")
+	status, err := h.jobs.GetJobStatus(c.UserContext(), id)
+	if err != nil {
+		h.log.LogErrorf("Failed to fetch parse status for job %s: %v", id, err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"error":   "Failed to fetch parse status",
+		})
+	}
+	return c.JSON(fiber.Map{
+		"success": true,
+		"status":  status,
+	})
+}
+
 // HandleGetTemplates handles GET /v1/parse/templates requests
 func (h *Handler) HandleGetTemplates(c *fiber.Ctx) error {
 	templates := h.service.GetAvailableTemplates()
