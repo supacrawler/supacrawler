@@ -24,7 +24,7 @@ import (
 	orderedmap "github.com/wk8/go-ordered-map/v2"
 )
 
-// StreamTestMode enables development mode with sample data
+// Set to true to test the streaming events without hitting real URLs or LLM APIs
 var StreamTestMode = false
 
 // Service implements intelligent parsing using Eino workflows with streaming
@@ -378,11 +378,11 @@ func (s *Service) analyzePromptNode(ctx context.Context, input *ParseInput) (map
 	if StreamTestMode {
 		time.Sleep(500 * time.Millisecond)
 		analysis := &PromptAnalysis{
-			Action:         "scrape",
-			URLs:           []string{"https://supacrawler.com/blog"},
+			Action:         "crawl",
+			URLs:           []string{"https://openai.com/news"},
 			OutputFormat:   "json",
-			MaxPages:       1,
-			ExtractionGoal: "Extract article titles, authors, published dates, summaries, and tags from blog posts",
+			MaxPages:       10,
+			ExtractionGoal: "Extract article titles, authors, published dates, summaries, and tags from OpenAI news",
 		}
 
 		workflowCtx := &WorkflowContext{
@@ -682,45 +682,7 @@ func (s *Service) processAllContentWithUnifiedLLM(ctx context.Context, rawConten
 	}
 
 	if StreamTestMode {
-		time.Sleep(800 * time.Millisecond)
-
-		demoData := []map[string]interface{}{
-			{
-				"title":   "Building Better Web Scrapers",
-				"author":  "John Doe",
-				"date":    "2024-01-15",
-				"summary": "Learn how to build efficient and reliable web scrapers using modern techniques.",
-				"tags":    []string{"web-scraping", "automation", "data"},
-				"url":     "https://supacrawler.com/blog/building-better-scrapers",
-			},
-			{
-				"title":   "Advanced Crawling Strategies",
-				"author":  "Jane Smith",
-				"date":    "2024-01-10",
-				"summary": "Deep dive into advanced techniques for crawling large websites efficiently.",
-				"tags":    []string{"crawling", "performance", "scaling"},
-				"url":     "https://supacrawler.com/blog/advanced-crawling",
-			},
-		}
-
-		totalInputChars := 0
-		for _, item := range rawContentList {
-			totalInputChars += len(item.Content)
-		}
-
-		inputTokens := int32(totalInputChars/4 + 200)
-		outputTokens := int32(450)
-
-		tokenUsage := &TokenUsage{
-			InputTokens:    inputTokens,
-			OutputTokens:   outputTokens,
-			TotalTokens:    inputTokens + outputTokens,
-			PagesProcessed: len(rawContentList),
-		}
-
-		s.log.LogInfof("Development mode: Returning sample data for %d pages", len(rawContentList))
-
-		return demoData, tokenUsage, nil
+		return s.simulateStreamingLLMAggregation(ctx, rawContentList)
 	}
 
 	// Prepare content for LLM processing
@@ -803,6 +765,9 @@ func (s *Service) processAllContentWithUnifiedLLM(ctx context.Context, rawConten
 
 	s.log.LogInfof("Enforcing JSON schema for aggregation output")
 
+	// Stream that we're starting LLM aggregation
+	s.publishLLMAggregationEvent(ctx, "llm.aggregation_start", "Starting LLM aggregation of collected content...")
+
 	// Call LLM with token tracking and JSON schema enforcement
 	response, tokenUsage, err := s.eino.GenerateWithTokenUsage(ctx, messages,
 		model.WithTemperature(0.1),
@@ -811,19 +776,24 @@ func (s *Service) processAllContentWithUnifiedLLM(ctx context.Context, rawConten
 	)
 
 	if err != nil {
+		s.publishLLMAggregationEvent(ctx, "llm.aggregation_error", fmt.Sprintf("LLM aggregation failed: %v", err))
 		return nil, s.convertEinoTokenUsage(tokenUsage, len(rawContentList)), fmt.Errorf("LLM processing failed: %w", err)
 	}
 
+	// Stream the LLM response content
+	s.publishLLMAggregationEvent(ctx, "llm.aggregation_content", response.Content)
 	s.log.LogInfof("LLM unified processing response: %s", response.Content)
 
 	// Parse and clean the response
 	cleanedData, parseErr := s.parseAndCleanLLMResponse(response.Content)
 	if parseErr != nil {
 		s.log.LogWarnf("Failed to parse LLM response as JSON, returning raw: %v", parseErr)
+		s.publishLLMAggregationEvent(ctx, "llm.aggregation_warning", fmt.Sprintf("JSON parsing warning: %v", parseErr))
 		cleanedData = response.Content
 	} else {
 		// 🔍 LOG: Detailed analysis of extracted data
 		s.analyzeExtractedData(cleanedData, len(rawContentList))
+		s.publishLLMAggregationEvent(ctx, "llm.aggregation_success", "LLM aggregation completed successfully")
 	}
 
 	// Convert Eino token usage to our format
@@ -989,12 +959,18 @@ func (s *Service) cleanJSONString(str string) interface{} {
 // streamScrapeContent handles single page scraping
 func (s *Service) streamScrapeContent(ctx context.Context, analysis PromptAnalysis, writer *schema.StreamWriter[*PageData]) {
 	for _, url := range analysis.URLs {
+		// Stream that we're starting to scrape this URL
+		s.publishLinkProgressEvent(ctx, "scrape.link_start", url, "Starting to scrape")
+
 		if StreamTestMode {
 			time.Sleep(1 * time.Second)
 			mockContent := "# Blog Posts\n\nThis is mock content from supacrawler.com/blog"
 			mockTitle := "Supacrawler Blog"
 			pageContent := &engineapi.PageContent{Markdown: mockContent}
 			pageContent.Metadata.Title = &mockTitle
+
+			// Stream success
+			s.publishLinkProgressEvent(ctx, "scrape.link_success", url, "Successfully scraped")
 			writer.Send(&PageData{URL: url, PageContent: pageContent}, nil)
 			continue
 		}
@@ -1007,6 +983,8 @@ func (s *Service) streamScrapeContent(ctx context.Context, analysis PromptAnalys
 
 		result, err := s.scrapeService.ScrapeURL(ctx, params)
 		if err != nil {
+			// Stream error
+			// s.publishLinkProgressEvent(ctx, "scrape.link_error", url, fmt.Sprintf("Scraping failed: %v", err))
 			writer.Send(&PageData{
 				URL:   url,
 				Error: err.Error(),
@@ -1031,6 +1009,8 @@ func (s *Service) streamScrapeContent(ctx context.Context, analysis PromptAnalys
 			pageContent.Metadata.Title = &title
 		}
 
+		// Stream success
+		s.publishLinkProgressEvent(ctx, "scrape.link_success", url, "Successfully scraped")
 		writer.Send(&PageData{
 			URL:         url,
 			PageContent: pageContent,
@@ -1084,8 +1064,12 @@ func (s *Service) streamCrawlContent(ctx context.Context, analysis PromptAnalysi
 	// Create a channel to receive streaming results
 	pageChan := make(chan *crawl.PageResult, 100)
 
-	// Start streaming crawl in goroutine
-	go s.crawlService.StreamCrawlToChannel(ctx, crawlReq, pageChan)
+	// Start streaming crawl in goroutine or simulate if in test mode
+	if StreamTestMode {
+		go s.simulateRealisticCrawling(ctx, pageChan)
+	} else {
+		go s.crawlService.StreamCrawlToChannel(ctx, crawlReq, pageChan)
+	}
 
 	// Process crawl results in real-time with immediate LLM extraction
 	totalPages := 0
@@ -1096,12 +1080,17 @@ func (s *Service) streamCrawlContent(ctx context.Context, analysis PromptAnalysi
 		totalPages++
 
 		if pageResult.Error != "" {
+			// Stream crawl error
+			s.publishLinkProgressEvent(ctx, "crawl.link_error", pageResult.URL, fmt.Sprintf("Crawling failed: %s", pageResult.Error))
 			writer.Send(&PageData{
 				URL:   pageResult.URL,
 				Error: pageResult.Error,
 			}, nil)
 		} else {
 			successfulPages++
+
+			// Stream crawl success
+			s.publishLinkProgressEvent(ctx, "crawl.link_success", pageResult.URL, "Successfully crawled")
 
 			// NEW: Send raw content directly - NO real-time LLM processing
 			pageData := &PageData{
@@ -1116,6 +1105,256 @@ func (s *Service) streamCrawlContent(ctx context.Context, analysis PromptAnalysi
 
 	wg.Wait()
 	s.log.LogInfof("Crawl completed: %d total pages, %d successful (raw content forwarded)", totalPages, successfulPages)
+}
+
+// simulateRealisticCrawling simulates the crawl flow based on real log data for testing
+func (s *Service) simulateRealisticCrawling(ctx context.Context, pageChan chan<- *crawl.PageResult) {
+	defer close(pageChan)
+
+	// URLs from actual scraper.log in realistic order with realistic timing
+	crawlSequence := []struct {
+		url     string
+		delay   time.Duration
+		content string
+	}{
+		{
+			url:     "https://openai.com/news",
+			delay:   500 * time.Millisecond,
+			content: "# OpenAI News\n\n## Latest Updates\n\nDiscover the latest developments in AI technology and research.",
+		},
+		{
+			url:     "https://openai.com/news/company-announcements/",
+			delay:   800 * time.Millisecond,
+			content: "# OpenAI Company Announcements\n\n## Recent Announcements\n\nStay updated with official company news and strategic partnerships.",
+		},
+		{
+			url:     "https://openai.com/news/research/",
+			delay:   1200 * time.Millisecond,
+			content: "# OpenAI Research\n\n## Research Publications\n\nExplore cutting-edge research in artificial intelligence and machine learning.",
+		},
+		{
+			url:     "https://openai.com/news/product-releases/",
+			delay:   600 * time.Millisecond,
+			content: "# OpenAI Product Releases\n\n## New Products\n\nLearn about the latest AI products and feature releases.",
+		},
+		{
+			url:     "https://openai.com/news/",
+			delay:   400 * time.Millisecond,
+			content: "# OpenAI News Hub\n\n## All News\n\nComprehensive coverage of OpenAI developments across all categories.",
+		},
+		{
+			url:     "https://openai.com/news/safety-alignment/",
+			delay:   1500 * time.Millisecond,
+			content: "# OpenAI Safety & Alignment\n\n## AI Safety Research\n\nAdvancing responsible AI development through safety research and alignment.",
+		},
+		{
+			url:     "https://openai.com/news/security/",
+			delay:   900 * time.Millisecond,
+			content: "# OpenAI Security\n\n## Security Updates\n\nEnsuring robust security measures and responsible disclosure practices.",
+		},
+		{
+			url:     "https://openai.com/news/global-affairs/",
+			delay:   1100 * time.Millisecond,
+			content: "# OpenAI Global Affairs\n\n## International Partnerships\n\nBuilding global partnerships and collaborations for responsible AI development.",
+		},
+	}
+
+	s.log.LogInfof("🧪 [StreamTestMode] Starting realistic crawl simulation with %d URLs", len(crawlSequence))
+
+	for i, item := range crawlSequence {
+		select {
+		case <-ctx.Done():
+			s.log.LogInfof("🧪 [StreamTestMode] Crawl simulation cancelled")
+			return
+		default:
+			// Simulate realistic processing delay
+			time.Sleep(item.delay)
+
+			// Create realistic page content
+			title := extractTitleFromURL(item.url)
+			pageContent := &engineapi.PageContent{
+				Markdown: item.content,
+				Links:    []string{}, // Simplified for demo
+				Metadata: engineapi.PageMetadata{
+					Title: &title,
+				},
+			}
+
+			// Send successful page result
+			pageResult := &crawl.PageResult{
+				URL:         item.url,
+				PageContent: pageContent,
+				Error:       "",
+			}
+
+			s.log.LogInfof("🧪 [StreamTestMode] Sending page %d/%d: %s", i+1, len(crawlSequence), item.url)
+			pageChan <- pageResult
+		}
+	}
+
+	s.log.LogInfof("🧪 [StreamTestMode] Crawl simulation completed - sent %d pages", len(crawlSequence))
+}
+
+// extractTitleFromURL creates a readable title from URL for simulation
+func extractTitleFromURL(url string) string {
+	// Simple title extraction for demo
+	if strings.Contains(url, "company-announcements") {
+		return "OpenAI Company Announcements"
+	} else if strings.Contains(url, "research") {
+		return "OpenAI Research"
+	} else if strings.Contains(url, "product-releases") {
+		return "OpenAI Product Releases"
+	} else if strings.Contains(url, "safety-alignment") {
+		return "OpenAI Safety & Alignment"
+	} else if strings.Contains(url, "security") {
+		return "OpenAI Security"
+	} else if strings.Contains(url, "global-affairs") {
+		return "OpenAI Global Affairs"
+	} else if strings.Contains(url, "/news") {
+		return "OpenAI News"
+	}
+	return "OpenAI Page"
+}
+
+// simulateStreamingLLMAggregation simulates realistic LLM processing with streaming events
+func (s *Service) simulateStreamingLLMAggregation(ctx context.Context, rawContentList []RawContentItem) (interface{}, *TokenUsage, error) {
+	s.log.LogInfof("🧪 [StreamTestMode] Starting LLM aggregation simulation for %d sources", len(rawContentList))
+
+	// Stream that we're starting LLM aggregation
+	s.publishLLMAggregationEvent(ctx, "llm.aggregation_start", "Starting LLM aggregation of collected content...")
+
+	// Simulate LLM processing time with multiple progress updates
+	progressMessages := []struct {
+		delay   time.Duration
+		content string
+	}{
+		{500 * time.Millisecond, "Processing page content and extracting structured data..."},
+		{800 * time.Millisecond, "Analyzing patterns and removing duplicates..."},
+		{1200 * time.Millisecond, "Generating summaries and categorizing content..."},
+		{600 * time.Millisecond, "Finalizing output format and validation..."},
+	}
+
+	for _, progress := range progressMessages {
+		time.Sleep(progress.delay)
+		s.publishLLMAggregationEvent(ctx, "llm.aggregation_progress", progress.content)
+	}
+
+	// Generate realistic output based on URLs that were actually crawled
+	demoData := s.generateRealisticOpenAINewsData(rawContentList)
+
+	// Stream the final LLM response content
+	responseContent := s.formatResponseAsJSON(demoData)
+	s.publishLLMAggregationEvent(ctx, "llm.aggregation_content", responseContent)
+
+	// Calculate realistic token usage
+	totalInputChars := 0
+	for _, item := range rawContentList {
+		totalInputChars += len(item.Content)
+	}
+
+	inputTokens := int32(totalInputChars/4 + 800)   // Realistic estimate
+	outputTokens := int32(len(responseContent) / 4) // Based on actual output
+
+	tokenUsage := &TokenUsage{
+		InputTokens:    inputTokens,
+		OutputTokens:   outputTokens,
+		TotalTokens:    inputTokens + outputTokens,
+		PagesProcessed: len(rawContentList),
+	}
+
+	s.publishLLMAggregationEvent(ctx, "llm.aggregation_success", "LLM aggregation completed successfully")
+	s.log.LogInfof("🧪 [StreamTestMode] LLM simulation completed - processed %d pages", len(rawContentList))
+
+	return demoData, tokenUsage, nil
+}
+
+// generateRealisticOpenAINewsData creates realistic data based on crawled URLs matching real API format
+func (s *Service) generateRealisticOpenAINewsData(rawContentList []RawContentItem) []map[string]interface{} {
+	newsItems := []map[string]interface{}{}
+
+	for i, item := range rawContentList {
+		var newsItem map[string]interface{}
+
+		// Generate content based on the URL - using exact format from real data
+		if strings.Contains(item.URL, "company-announcements") {
+			newsItem = map[string]interface{}{
+				"author":         "OpenAI",
+				"published_date": "Sep 25, 2025",
+				"reading_time":   nil,
+				"summary":        "OpenAI announces strategic partnerships with leading technology companies to accelerate AI development and deployment worldwide. These partnerships focus on expanding AI capabilities and infrastructure to serve global markets more effectively.",
+				"tags":           []string{"Company"},
+				"title":          "OpenAI expands global partnerships for AI development",
+			}
+		} else if strings.Contains(item.URL, "research") {
+			newsItem = map[string]interface{}{
+				"author":         "OpenAI",
+				"published_date": "Sep 24, 2025",
+				"reading_time":   nil,
+				"summary":        "New research publication details breakthrough methods for ensuring AI systems remain aligned with human values and intentions. This work contributes to the broader field of AI safety and responsible development practices.",
+				"tags":           []string{"Research"},
+				"title":          "Advancing AI safety through novel research methodologies",
+			}
+		} else if strings.Contains(item.URL, "product-releases") {
+			newsItem = map[string]interface{}{
+				"author":         "OpenAI",
+				"published_date": "Sep 23, 2025",
+				"reading_time":   nil,
+				"summary":        "Latest GPT model releases offer improved performance, better reasoning capabilities, and enhanced safety features. These updates aim to provide more powerful and reliable AI tools for developers and users across various applications.",
+				"tags":           []string{"Product"},
+				"title":          "Introducing enhanced GPT models with improved capabilities",
+			}
+		} else if strings.Contains(item.URL, "safety-alignment") {
+			newsItem = map[string]interface{}{
+				"author":         "OpenAI",
+				"published_date": "Sep 22, 2025",
+				"reading_time":   nil,
+				"summary":        "Comprehensive overview of OpenAI's approach to developing safe and beneficial artificial general intelligence systems. This article outlines the company's commitment to responsible AI development and alignment research.",
+				"tags":           []string{"Safety"},
+				"title":          "Building toward safe artificial general intelligence",
+			}
+		} else if strings.Contains(item.URL, "security") {
+			newsItem = map[string]interface{}{
+				"author":         "OpenAI",
+				"published_date": "Sep 21, 2025",
+				"reading_time":   nil,
+				"summary":        "Details on new security measures and protocols implemented to protect AI systems and user data. This article discusses OpenAI's approach to scaling security measures through responsible disclosure practices.",
+				"tags":           []string{"Security"},
+				"title":          "Scaling security with responsible disclosure practices",
+			}
+		} else if strings.Contains(item.URL, "global-affairs") {
+			newsItem = map[string]interface{}{
+				"author":         "OpenAI",
+				"published_date": "Sep 20, 2025",
+				"reading_time":   nil,
+				"summary":        "OpenAI partners with international organizations to establish responsible AI governance frameworks. This collaboration aims to enhance online safety and develop AI solutions that benefit communities worldwide.",
+				"tags":           []string{"Global Affairs"},
+				"title":          "International AI governance and community partnerships",
+			}
+		} else {
+			// Default news item for /news and /news/ pages
+			newsItem = map[string]interface{}{
+				"author":         "OpenAI",
+				"published_date": "Sep 27, 2025",
+				"reading_time":   nil,
+				"summary":        "Latest developments and updates from OpenAI covering various aspects of AI research and development. This comprehensive overview showcases recent advancements in artificial intelligence technology and applications.",
+				"tags":           []string{"Product"},
+				"title":          fmt.Sprintf("OpenAI news and updates - Page %d", i+1),
+			}
+		}
+
+		newsItems = append(newsItems, newsItem)
+	}
+
+	return newsItems
+}
+
+// formatResponseAsJSON formats the response data as JSON string for streaming
+func (s *Service) formatResponseAsJSON(data []map[string]interface{}) string {
+	jsonBytes, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return `[{"error": "Failed to format response"}]`
+	}
+	return string(jsonBytes)
 }
 
 // fallbackPromptAnalysis provides regex-based analysis when LLM fails
@@ -1238,5 +1477,48 @@ func (s *Service) publishProgressEvent(ctx context.Context, event, message strin
 
 	if StreamTestMode {
 		time.Sleep(300 * time.Millisecond)
+	}
+}
+
+// publishLinkProgressEvent publishes link-level crawling/scraping events
+func (s *Service) publishLinkProgressEvent(ctx context.Context, event, url, message string) {
+	if tracer, ok := ctx.Value("eino_tracer").(*EinoTracer); ok && tracer != nil {
+		traceEvent := map[string]interface{}{
+			"jobId":     tracer.jobID,
+			"event":     event,
+			"component": "link",
+			"timing":    "progress",
+			"timestamp": time.Now().UnixMilli(),
+			"metadata": map[string]interface{}{
+				"url":     url,
+				"message": message,
+			},
+		}
+		tracer.jobService.PublishJobTrace(ctx, tracer.jobID, traceEvent)
+	}
+
+	if StreamTestMode {
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// publishLLMAggregationEvent publishes LLM aggregation streaming events
+func (s *Service) publishLLMAggregationEvent(ctx context.Context, event, content string) {
+	if tracer, ok := ctx.Value("eino_tracer").(*EinoTracer); ok && tracer != nil {
+		traceEvent := map[string]interface{}{
+			"jobId":     tracer.jobID,
+			"event":     event,
+			"component": "llm",
+			"timing":    "progress",
+			"timestamp": time.Now().UnixMilli(),
+			"metadata": map[string]interface{}{
+				"content": content,
+			},
+		}
+		tracer.jobService.PublishJobTrace(ctx, tracer.jobID, traceEvent)
+	}
+
+	if StreamTestMode {
+		time.Sleep(200 * time.Millisecond)
 	}
 }

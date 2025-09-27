@@ -106,9 +106,10 @@ func (s *Service) ScrapeURL(ctx context.Context, params engineapi.GetV1ScrapePar
 
 	// Success! Cache and return
 	s.cache(ctx, params, result)
-	s.log.LogSuccessf("scrape ok url=%s status=%d method=%s",
+	s.log.LogSuccessf("scrape ok url=%s status=%d method=%s output=%s",
 		params.Url, intVal(result.Metadata.StatusCode),
-		map[bool]string{true: "playwright", false: "http"}[usePlaywright])
+		map[bool]string{true: "playwright", false: "http"}[usePlaywright],
+		result.Content)
 	return result, nil
 }
 
