@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"regexp"
 	"strings"
@@ -106,10 +107,17 @@ func (s *Service) ScrapeURL(ctx context.Context, params engineapi.GetV1ScrapePar
 
 	// Success! Cache and return
 	s.cache(ctx, params, result)
+	contentPreview := ""
+	if result.Content != nil {
+		contentPreview = *result.Content
+		if len(contentPreview) > 100 {
+			contentPreview = contentPreview[:100] + "..."
+		}
+	}
 	s.log.LogSuccessf("scrape ok url=%s status=%d method=%s output=%s",
 		params.Url, intVal(result.Metadata.StatusCode),
 		map[bool]string{true: "playwright", false: "http"}[usePlaywright],
-		result.Content)
+		contentPreview)
 	return result, nil
 }
 
@@ -122,7 +130,7 @@ func (s *Service) scrapeSimpleHTTP(params engineapi.GetV1ScrapeParams) (*enginea
 	}
 
 	// Use user agent from backend or default
-	userAgent := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+	userAgent := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 	if params.UserAgent != nil && *params.UserAgent != "" {
 		userAgent = *params.UserAgent
 		s.log.LogDebugf("Using user agent from backend: %s", userAgent)
@@ -131,6 +139,14 @@ func (s *Service) scrapeSimpleHTTP(params engineapi.GetV1ScrapeParams) (*enginea
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
+	req.Header.Set("Sec-Ch-Ua", `"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"`)
+	req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
+	req.Header.Set("Sec-Ch-Ua-Platform", `"Windows"`)
+	req.Header.Set("Sec-Fetch-Dest", "document")
+	req.Header.Set("Sec-Fetch-Mode", "navigate")
+	req.Header.Set("Sec-Fetch-Site", "none")
+	req.Header.Set("Sec-Fetch-User", "?1")
 	req.Header.Set("DNT", "1")
 	req.Header.Set("Connection", "keep-alive")
 	req.Header.Set("Upgrade-Insecure-Requests", "1")
@@ -145,6 +161,11 @@ func (s *Service) scrapeSimpleHTTP(params engineapi.GetV1ScrapeParams) (*enginea
 			s.log.LogDebugf("Proxy session: %s", *params.ProxySession)
 		}
 	}
+
+	// Add random delay to avoid rate limiting (1-3 seconds)
+	delay := time.Duration(rand.Intn(2000)+1000) * time.Millisecond
+	s.log.LogDebugf("Adding %v delay before request to %s", delay, params.Url)
+	time.Sleep(delay)
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
@@ -222,7 +243,19 @@ func (s *Service) scrapeWithPlaywright(params engineapi.GetV1ScrapeParams) (*eng
 	if err != nil {
 		return nil, fmt.Errorf("playwright run: %w", err)
 	}
-	browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{Headless: playwright.Bool(true)})
+	browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
+		Headless: playwright.Bool(true),
+		Args: []string{
+			"--no-sandbox",
+			"--disable-dev-shm-usage",
+			"--disable-blink-features=AutomationControlled",
+			"--disable-web-security",
+			"--disable-features=VizDisplayCompositor",
+			"--no-first-run",
+			"--disable-default-apps",
+			"--disable-extensions",
+		},
+	})
 	if err != nil {
 		_ = pw.Stop()
 		return nil, fmt.Errorf("launch: %w", err)
@@ -231,7 +264,7 @@ func (s *Service) scrapeWithPlaywright(params engineapi.GetV1ScrapeParams) (*eng
 	defer browser.Close()
 
 	// Use user agent from backend or default
-	userAgent := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+	userAgent := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 	if params.UserAgent != nil && *params.UserAgent != "" {
 		userAgent = *params.UserAgent
 		s.log.LogDebugf("Using user agent from backend: %s", userAgent)
@@ -248,6 +281,13 @@ func (s *Service) scrapeWithPlaywright(params engineapi.GetV1ScrapeParams) (*eng
 			"Accept":                    "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
 			"Accept-Language":           "en-US,en;q=0.9",
 			"Accept-Encoding":           "gzip, deflate, br",
+			"Sec-Ch-Ua":                 `"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"`,
+			"Sec-Ch-Ua-Mobile":          "?0",
+			"Sec-Ch-Ua-Platform":        `"Windows"`,
+			"Sec-Fetch-Dest":            "document",
+			"Sec-Fetch-Mode":            "navigate",
+			"Sec-Fetch-Site":            "none",
+			"Sec-Fetch-User":            "?1",
 			"DNT":                       "1",
 			"Connection":                "keep-alive",
 			"Upgrade-Insecure-Requests": "1",
@@ -260,6 +300,28 @@ func (s *Service) scrapeWithPlaywright(params engineapi.GetV1ScrapeParams) (*eng
 	if err != nil {
 		return nil, err
 	}
+
+	// Add stealth scripts to avoid detection
+	stealthScript := `
+		// Remove webdriver property
+		Object.defineProperty(navigator, 'webdriver', {
+			get: () => undefined,
+		});
+		
+		// Remove automation indicators
+		delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array;
+		delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise;
+		delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol;
+		
+		// Override permissions
+		const originalQuery = window.navigator.permissions.query;
+		window.navigator.permissions.query = (parameters) => (
+			parameters.name === 'notifications' ?
+				Promise.resolve({ state: Notification.permission }) :
+				originalQuery(parameters)
+		);
+	`
+	page.AddInitScript(playwright.Script{Content: playwright.String(stealthScript)})
 
 	s.log.LogDebugf("Using Playwright with User-Agent: %s", userAgent)
 
@@ -349,8 +411,10 @@ func (s *Service) scrapeWithPlaywright(params engineapi.GetV1ScrapeParams) (*eng
 
 func newHTTPClient() *http.Client {
 	transport := &http.Transport{
-		MaxIdleConns:    100,
-		IdleConnTimeout: 90 * time.Second,
+		MaxIdleConns:      100,
+		IdleConnTimeout:   90 * time.Second,
+		MaxConnsPerHost:   10, // Limit concurrent connections per host
+		DisableKeepAlives: false,
 	}
 	return &http.Client{Transport: transport, Timeout: 10 * time.Second}
 }
