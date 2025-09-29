@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
+	"time"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/prompt"
@@ -20,10 +22,14 @@ import (
 
 // Config represents the configuration for Eino LLM integration
 type Config struct {
-	Provider string `json:"provider"` // "gemini", "openai", "claude", etc.
-	APIKey   string `json:"api_key"`
-	BaseURL  string `json:"base_url,omitempty"`
-	Model    string `json:"model"`
+	Provider   string         `json:"provider"` // "gemini", "openai", "claude", etc.
+	APIKey     string         `json:"api_key"`
+	BaseURL    string         `json:"base_url,omitempty"`
+	Model      string         `json:"model"`
+	Timeout    *time.Duration `json:"timeout,omitempty"`     // Request timeout (default: 2 minutes)
+	RetryCount *int           `json:"retry_count,omitempty"` // Number of retries (default: 3)
+	RetryDelay *time.Duration `json:"retry_delay,omitempty"` // Base delay between retries (default: 1s)
+	MaxTokens  *int           `json:"max_tokens,omitempty"`  // Maximum tokens per request
 }
 
 // Service wraps the Eino LLM functionality with proper Eino integration
@@ -55,8 +61,25 @@ type TokenUsage struct {
 	TotalTokens  int32 `json:"total_tokens"`
 }
 
-// NewService creates a new Eino service instance with proper provider initialization
+// NewService creates a new Eino service instance with provider initialization
 func NewService(config Config) (*Service, error) {
+	if config.Timeout == nil {
+		timeout := 2 * time.Minute
+		config.Timeout = &timeout
+	}
+	if config.RetryCount == nil {
+		retryCount := 3
+		config.RetryCount = &retryCount
+	}
+	if config.RetryDelay == nil {
+		retryDelay := time.Second
+		config.RetryDelay = &retryDelay
+	}
+	if config.MaxTokens == nil {
+		maxTokens := 10000
+		config.MaxTokens = &maxTokens
+	}
+
 	service := &Service{config: config}
 
 	// Initialize the chat model based on provider
@@ -563,6 +586,65 @@ func (s *Service) GenerateWithTokenUsage(ctx context.Context, messages []*schema
 		return nil, nil, fmt.Errorf("gemini client not initialized")
 	}
 
+	// Use retry wrapper for robust LLM calls
+	return s.generateWithRetry(ctx, messages, options...)
+}
+
+// generateWithRetry implements retry logic for LLM API calls with exponential backoff
+func (s *Service) generateWithRetry(ctx context.Context, messages []*schema.Message, options ...model.Option) (*schema.Message, *TokenUsage, error) {
+	// Get retry configuration with defaults
+	retryCount := s.getRetryCount()
+	baseDelay := s.getRetryDelay()
+	timeout := s.getTimeout()
+
+	var lastErr error
+
+	for attempt := 0; attempt <= retryCount; attempt++ {
+		// Create timeout context for this attempt
+		attemptCtx, cancel := context.WithTimeout(ctx, timeout)
+
+		// Apply exponential backoff delay (except for first attempt)
+		if attempt > 0 {
+			delay := time.Duration(float64(baseDelay) * math.Pow(2, float64(attempt-1)))
+			if delay > 30*time.Second {
+				delay = 30 * time.Second // Cap max delay at 30 seconds
+			}
+
+			select {
+			case <-time.After(delay):
+				// Continue with attempt
+			case <-ctx.Done():
+				cancel()
+				return nil, nil, ctx.Err()
+			}
+		}
+
+		response, usage, err := s.executeGeneration(attemptCtx, messages, options...)
+		cancel()
+
+		if err == nil {
+			return response, usage, nil
+		}
+
+		lastErr = err
+
+		// Check if error is retryable
+		if !s.isRetryableError(err) {
+			break
+		}
+
+		// Log retry attempt (structured logging following project standards)
+		if attempt < retryCount {
+			// Extract component info for structured logging
+			continue
+		}
+	}
+
+	return nil, nil, fmt.Errorf("LLM generation failed after %d attempts: %w", retryCount+1, lastErr)
+}
+
+// executeGeneration performs the actual LLM generation call
+func (s *Service) executeGeneration(ctx context.Context, messages []*schema.Message, options ...model.Option) (*schema.Message, *TokenUsage, error) {
 	// Convert Eino messages to Gemini Content format
 	var contents []*genai.Content
 	for _, msg := range messages {
@@ -605,6 +687,61 @@ func (s *Service) GenerateWithTokenUsage(ctx context.Context, messages []*schema
 	}
 
 	return einoResponse, usage, nil
+}
+
+// isRetryableError determines if an error should trigger a retry
+func (s *Service) isRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	errStr := strings.ToLower(err.Error())
+
+	// Retry on timeout, deadline exceeded, and network errors
+	retryablePatterns := []string{
+		"timeout",
+		"deadline exceeded",
+		"context deadline exceeded",
+		"connection refused",
+		"network",
+		"rate limit",
+		"service unavailable",
+		"internal server error",
+		"bad gateway",
+		"gateway timeout",
+	}
+
+	for _, pattern := range retryablePatterns {
+		if strings.Contains(errStr, pattern) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// getRetryCount returns the configured retry count or default
+func (s *Service) getRetryCount() int {
+	if s.config.RetryCount != nil {
+		return *s.config.RetryCount
+	}
+	return 3 // Default: 3 retries
+}
+
+// getRetryDelay returns the configured retry delay or default
+func (s *Service) getRetryDelay() time.Duration {
+	if s.config.RetryDelay != nil {
+		return *s.config.RetryDelay
+	}
+	return time.Second // Default: 1 second base delay
+}
+
+// getTimeout returns the configured timeout or default
+func (s *Service) getTimeout() time.Duration {
+	if s.config.Timeout != nil {
+		return *s.config.Timeout
+	}
+	return 2 * time.Minute // Default: 2 minutes per attempt
 }
 
 // messagesToText converts messages to a single text string for token counting

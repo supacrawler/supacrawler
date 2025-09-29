@@ -282,7 +282,8 @@ func (s *Service) ProcessWithWorkflow(ctx context.Context, req engineapi.ParseCr
 	s.log.LogInfof("[parse] Starting Eino workflow for prompt: %s", req.Prompt)
 	startTime := time.Now()
 
-	workflowCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	// Increased timeout to allow for retries within LLM operations
+	workflowCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 
 	input := &ParseInput{Request: req}
