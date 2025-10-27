@@ -8,17 +8,19 @@ require (
 	github.com/antoineross/supabase-go v0.2.0
 	github.com/cloudwego/eino v0.4.8
 	github.com/cloudwego/eino-ext/components/model/gemini v0.1.6
+	github.com/eino-contrib/jsonschema v1.0.0
 	github.com/go-redis/redis/v8 v8.11.5
 	github.com/gocolly/colly v1.2.0
 	github.com/gofiber/fiber/v2 v2.52.9
 	github.com/google/uuid v1.6.0
 	github.com/hibiken/asynq v0.25.1
+	github.com/joho/godotenv v1.5.1
 	github.com/oapi-codegen/runtime v1.1.2
 	github.com/playwright-community/playwright-go v0.4901.0
 	github.com/rs/zerolog v1.34.0
 	github.com/supabase-community/storage-go v0.7.0
+	github.com/wk8/go-ordered-map/v2 v2.1.8
 	google.golang.org/genai v1.23.0
-	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
@@ -40,7 +42,6 @@ require (
 	github.com/deckarep/golang-set/v2 v2.6.0 // indirect
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/eino-contrib/jsonschema v1.0.0 // indirect
 	github.com/getkin/kin-openapi v0.118.0 // indirect
 	github.com/go-jose/go-jose/v3 v3.0.3 // indirect
 	github.com/go-openapi/jsonpointer v0.21.0 // indirect
@@ -89,7 +90,6 @@ require (
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/valyala/fasthttp v1.51.0 // indirect
 	github.com/valyala/tcplisten v1.0.0 // indirect
-	github.com/wk8/go-ordered-map/v2 v2.1.8 // indirect
 	github.com/yargevad/filepathx v1.0.0 // indirect
 	go.opencensus.io v0.24.0 // indirect
 	golang.org/x/arch v0.12.0 // indirect
@@ -103,4 +103,5 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20240903143218-8af14fe29dc1 // indirect
 	google.golang.org/grpc v1.66.2 // indirect
 	google.golang.org/protobuf v1.35.2 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

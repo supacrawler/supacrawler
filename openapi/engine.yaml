@@ -4,8 +4,10 @@ info:
   version: 0.1.0
   description: HTTP API for scraping, mapping, crawling, and screenshots
 servers:
-  - url: http://localhost:8081
-    description: Local engine
+  - url: https://api.supacrawler.com
+    description: Production API
+security:
+  - BearerAuth: []
 tags:
   - name: health
   - name: scrape
@@ -39,7 +41,9 @@ paths:
           name: format
           schema:
             type: string
-            enum: [markdown, links]
+            enum: [markdown]
+            default: markdown
+          description: Output format for scraped content (currently only markdown is supported)
         - in: query
           name: depth
           schema:
@@ -50,10 +54,6 @@ paths:
           schema:
             type: integer
             minimum: 0
-        - in: query
-          name: render_js
-          schema:
-            type: boolean
         - in: query
           name: include_html
           schema:
@@ -167,6 +167,28 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
   /v1/parse:
+    get:
+      tags: [parse]
+      summary: Get parse job status and result
+      description: Retrieve the status and results of a previously submitted parse job
+      parameters:
+        - in: query
+          name: job_id
+          required: true
+          schema:
+            type: string
+          description: The job ID returned from the POST /v1/parse request
+      responses:
+        '200':
+          description: Parse job status and result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParseResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
     post:
       tags: [parse]
       summary: Parse HTML or Markdown content using LLM
@@ -253,6 +275,12 @@ paths:
           $ref: '#/components/responses/NotFound'
 
 components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: 'Enter your API key. Get yours at: https://supacrawler.com/dashboard/api-keys'
   responses:
     BadRequest:
       description: Bad request
@@ -384,8 +412,6 @@ components:
           type: integer
         include_subdomains:
           type: boolean
-        render_js:
-          type: boolean
         include_html:
           type: boolean
         fresh:
@@ -480,8 +506,6 @@ components:
             type: string
         statistics:
           $ref: '#/components/schemas/CrawlStatistics'
-        render_js:
-          type: boolean
 
     PageContent:
       type: object

@@ -12,6 +12,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/hibiken/asynq"
+	"github.com/joho/godotenv"
 
 	"scraper/internal/config"
 	"scraper/internal/core/crawl"
@@ -29,6 +30,9 @@ import (
 )
 
 func main() {
+	// Load .env file if it exists (ignore error if file doesn't exist)
+	_ = godotenv.Load()
+
 	cfg := config.Load()
 	log.Printf("[scraper] starting at %s (env=%s)\n", cfg.HTTPAddr, cfg.AppEnv)
 

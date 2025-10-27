@@ -1,19 +1,18 @@
 # Stage 1: Modules caching
-FROM golang:1.24.4 AS modules
+FROM golang:1.23.4 AS modules
 WORKDIR /app
-# Copy only module files and local replace targets for caching and resolution
-COPY supacrawler/go.mod supacrawler/go.sum ./
-COPY packages /packages
+# Copy only module files for caching
+COPY go.mod go.sum ./
 RUN go mod download
 
-# Stage 2: Build
-FROM golang:1.24.4 AS builder
+# Stage 2: Builder
+FROM golang:1.23.4 AS builder
 COPY --from=modules /go/pkg /go/pkg
-WORKDIR /workdir
-# Copy only the scraper source to keep context small
-COPY supacrawler/ ./
+WORKDIR /app
+# Copy source code
+COPY . ./
 # Install playwright cli with right version for later use
-RUN PWGO_VER=$(grep -oE "playwright-go v\S+" /workdir/go.mod | sed 's/playwright-go //g') \
+RUN PWGO_VER=$(grep -oE "playwright-go v\S+" /app/go.mod | sed 's/playwright-go //g') \
     && go install github.com/playwright-community/playwright-go/cmd/playwright@${PWGO_VER} \
     && go install github.com/air-verse/air@v1.61.5
 

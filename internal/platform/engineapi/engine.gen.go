@@ -16,6 +16,10 @@ import (
 	"github.com/oapi-codegen/runtime"
 )
 
+const (
+	BearerAuthScopes = "BearerAuth.Scopes"
+)
+
 // Defines values for CrawlCreateRequestFormat.
 const (
 	CrawlCreateRequestFormatHtml     CrawlCreateRequestFormat = "html"
@@ -109,7 +113,6 @@ const (
 
 // Defines values for GetV1ScrapeParamsFormat.
 const (
-	Links    GetV1ScrapeParamsFormat = "links"
 	Markdown GetV1ScrapeParamsFormat = "markdown"
 )
 
@@ -148,7 +151,6 @@ type CrawlCreateRequest struct {
 
 	// ProxySession Sticky session key for proxy consistency
 	ProxySession *string `json:"proxy_session,omitempty"`
-	RenderJs     *bool   `json:"render_js,omitempty"`
 
 	// RotateUserAgent Enable user agent rotation
 	RotateUserAgent *bool  `json:"rotate_user_agent,omitempty"`
@@ -183,7 +185,6 @@ type CrawlCreateResponse struct {
 type CrawlJobData struct {
 	CrawlData  *map[string]PageContent `json:"crawl_data,omitempty"`
 	ErrorData  *map[string]string      `json:"error_data,omitempty"`
-	RenderJs   *bool                   `json:"render_js,omitempty"`
 	Statistics *CrawlStatistics        `json:"statistics,omitempty"`
 	Url        *string                 `json:"url,omitempty"`
 }
@@ -476,13 +477,20 @@ type TooManyRequests = Error
 // UnprocessableEntity defines model for UnprocessableEntity.
 type UnprocessableEntity = Error
 
+// GetV1ParseParams defines parameters for GetV1Parse.
+type GetV1ParseParams struct {
+	// JobId The job ID returned from the POST /v1/parse request
+	JobId string `form:"job_id" json:"job_id"`
+}
+
 // GetV1ScrapeParams defines parameters for GetV1Scrape.
 type GetV1ScrapeParams struct {
-	Url                  string                      `form:"url" json:"url"`
+	Url string `form:"url" json:"url"`
+
+	// Format Output format for scraped content (currently only markdown is supported)
 	Format               *GetV1ScrapeParamsFormat    `form:"format,omitempty" json:"format,omitempty"`
 	Depth                *int                        `form:"depth,omitempty" json:"depth,omitempty"`
 	MaxLinks             *int                        `form:"max_links,omitempty" json:"max_links,omitempty"`
-	RenderJs             *bool                       `form:"render_js,omitempty" json:"render_js,omitempty"`
 	IncludeHtml          *bool                       `form:"include_html,omitempty" json:"include_html,omitempty"`
 	Fresh                *bool                       `form:"fresh,omitempty" json:"fresh,omitempty"`
 	ProxyMode            *GetV1ScrapeParamsProxyMode `form:"proxy_mode,omitempty" json:"proxy_mode,omitempty"`
@@ -599,6 +607,9 @@ type ClientInterface interface {
 	// GetV1CrawlJobId request
 	GetV1CrawlJobId(ctx context.Context, jobId string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetV1Parse request
+	GetV1Parse(ctx context.Context, params *GetV1ParseParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// PostV1ParseWithBody request with any body
 	PostV1ParseWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -660,6 +671,18 @@ func (c *Client) PostV1Crawl(ctx context.Context, body PostV1CrawlJSONRequestBod
 
 func (c *Client) GetV1CrawlJobId(ctx context.Context, jobId string, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetV1CrawlJobIdRequest(c.Server, jobId)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetV1Parse(ctx context.Context, params *GetV1ParseParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV1ParseRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -867,6 +890,51 @@ func NewGetV1CrawlJobIdRequest(server string, jobId string) (*http.Request, erro
 	return req, nil
 }
 
+// NewGetV1ParseRequest generates requests for GetV1Parse
+func NewGetV1ParseRequest(server string, params *GetV1ParseParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v1/parse")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if queryFrag, err := runtime.StyleParamWithLocation("form", true, "job_id", runtime.ParamLocationQuery, params.JobId); err != nil {
+			return nil, err
+		} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+			return nil, err
+		} else {
+			for k, v := range parsed {
+				for _, v2 := range v {
+					queryValues.Add(k, v2)
+				}
+			}
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewPostV1ParseRequest calls the generic PostV1Parse builder with application/json body
 func NewPostV1ParseRequest(server string, body PostV1ParseJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -1030,22 +1098,6 @@ func NewGetV1ScrapeRequest(server string, params *GetV1ScrapeParams) (*http.Requ
 		if params.MaxLinks != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "max_links", runtime.ParamLocationQuery, *params.MaxLinks); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		if params.RenderJs != nil {
-
-			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "render_js", runtime.ParamLocationQuery, *params.RenderJs); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err
@@ -1369,6 +1421,9 @@ type ClientWithResponsesInterface interface {
 	// GetV1CrawlJobIdWithResponse request
 	GetV1CrawlJobIdWithResponse(ctx context.Context, jobId string, reqEditors ...RequestEditorFn) (*GetV1CrawlJobIdResponse, error)
 
+	// GetV1ParseWithResponse request
+	GetV1ParseWithResponse(ctx context.Context, params *GetV1ParseParams, reqEditors ...RequestEditorFn) (*GetV1ParseResponse, error)
+
 	// PostV1ParseWithBodyWithResponse request with any body
 	PostV1ParseWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV1ParseResponse, error)
 
@@ -1453,6 +1508,30 @@ func (r GetV1CrawlJobIdResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r GetV1CrawlJobIdResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetV1ParseResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *ParseResponse
+	JSON404      *NotFound
+	JSON500      *InternalError
+}
+
+// Status returns HTTPResponse.Status
+func (r GetV1ParseResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetV1ParseResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -1638,6 +1717,15 @@ func (c *ClientWithResponses) GetV1CrawlJobIdWithResponse(ctx context.Context, j
 	return ParseGetV1CrawlJobIdResponse(rsp)
 }
 
+// GetV1ParseWithResponse request returning *GetV1ParseResponse
+func (c *ClientWithResponses) GetV1ParseWithResponse(ctx context.Context, params *GetV1ParseParams, reqEditors ...RequestEditorFn) (*GetV1ParseResponse, error) {
+	rsp, err := c.GetV1Parse(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetV1ParseResponse(rsp)
+}
+
 // PostV1ParseWithBodyWithResponse request with arbitrary body returning *PostV1ParseResponse
 func (c *ClientWithResponses) PostV1ParseWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV1ParseResponse, error) {
 	rsp, err := c.PostV1ParseWithBody(ctx, contentType, body, reqEditors...)
@@ -1784,6 +1872,46 @@ func ParseGetV1CrawlJobIdResponse(rsp *http.Response) (*GetV1CrawlJobIdResponse,
 			return nil, err
 		}
 		response.JSON404 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetV1ParseResponse parses an HTTP response from a GetV1ParseWithResponse call
+func ParseGetV1ParseResponse(rsp *http.Response) (*GetV1ParseResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetV1ParseResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ParseResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest NotFound
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest InternalError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON500 = &dest
 
 	}
 

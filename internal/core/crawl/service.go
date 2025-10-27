@@ -57,10 +57,6 @@ func (s *CrawlService) StreamCrawlToChannel(ctx context.Context, req engineapi.C
 	if req.IncludeHtml != nil {
 		includeHTML = *req.IncludeHtml
 	}
-	renderJs := false
-	if req.RenderJs != nil {
-		renderJs = *req.RenderJs
-	}
 	includeSubs := false
 	if req.IncludeSubdomains != nil {
 		includeSubs = *req.IncludeSubdomains
@@ -99,7 +95,7 @@ func (s *CrawlService) StreamCrawlToChannel(ctx context.Context, req engineapi.C
 
 	// Scrape starting URL first, but only if it matches patterns
 	if matchesPattern(req.Url, patterns) {
-		if data, err := s.scrapeWithOptions(ctx, req.Url, includeHTML, renderJs, fresh, userAgent, waitSelectors); err != nil {
+		if data, err := s.scrapeWithOptions(ctx, req.Url, includeHTML, fresh, userAgent, waitSelectors); err != nil {
 			s.log.LogWarnf("start url scrape failed %s: %v", req.Url, err)
 			pageChan <- &PageResult{
 				URL:   req.Url,
@@ -174,7 +170,7 @@ func (s *CrawlService) StreamCrawlToChannel(ctx context.Context, req engineapi.C
 			s.log.LogInfof("Mapper found only %d links, trying scrape service fallback for dynamic content", mapperFoundLinks)
 
 			// Use scrape service to get links from the main page
-			if additionalLinks := s.getLinks(streamCtx, req.Url, renderJs, userAgent, waitSelectors); len(additionalLinks) > 0 {
+			if additionalLinks := s.getLinks(streamCtx, req.Url, userAgent, waitSelectors); len(additionalLinks) > 0 {
 				s.log.LogInfof("Scrape service found %d additional links", len(additionalLinks))
 
 				// Filter and add additional links
@@ -208,11 +204,8 @@ func (s *CrawlService) StreamCrawlToChannel(ctx context.Context, req engineapi.C
 		close(linksCh)
 	}()
 
-	// Worker pool for streaming
-	maxWorkers := 10
-	if renderJs {
-		maxWorkers = 2
-	}
+	// Worker pool for streaming (always use 2 workers for Playwright)
+	maxWorkers := 2
 	var wg sync.WaitGroup
 
 	// Track reserved slots to prevent race conditions
@@ -259,7 +252,7 @@ func (s *CrawlService) StreamCrawlToChannel(ctx context.Context, req engineapi.C
 				continue
 			}
 
-			res, err := s.scrapeWithOptions(ctx, u, includeHTML, renderJs, fresh, userAgent, waitSelectors)
+			res, err := s.scrapeWithOptions(ctx, u, includeHTML, fresh, userAgent, waitSelectors)
 			if err != nil {
 				pageChan <- &PageResult{
 					URL:   u,
@@ -442,10 +435,6 @@ func (s *CrawlService) streamCrawl(ctx context.Context, r engineapi.CrawlCreateR
 	if r.IncludeHtml != nil {
 		includeHTML = *r.IncludeHtml
 	}
-	renderJs := false
-	if r.RenderJs != nil {
-		renderJs = *r.RenderJs
-	}
 	includeSubs := false
 	if r.IncludeSubdomains != nil {
 		includeSubs = *r.IncludeSubdomains
@@ -479,7 +468,7 @@ func (s *CrawlService) streamCrawl(ctx context.Context, r engineapi.CrawlCreateR
 
 	// Scrape starting URL first, but only if it matches patterns
 	if matchesPattern(r.Url, patterns) {
-		if data, err := s.scrapeWithOptions(ctx, r.Url, includeHTML, renderJs, fresh, userAgent, waitSelectors); err != nil {
+		if data, err := s.scrapeWithOptions(ctx, r.Url, includeHTML, fresh, userAgent, waitSelectors); err != nil {
 			s.log.LogWarnf("start url scrape failed %s: %v", r.Url, err)
 			errs[r.Url] = err.Error()
 		} else if data != nil {
@@ -523,11 +512,8 @@ func (s *CrawlService) streamCrawl(ctx context.Context, r engineapi.CrawlCreateR
 		close(linksCh)
 	}()
 
-	// Worker pool
-	maxWorkers := 20
-	if renderJs {
-		maxWorkers = 2
-	}
+	// Worker pool (always use 2 workers for Playwright)
+	maxWorkers := 2
 	var wg sync.WaitGroup
 
 	// Track reserved slots to prevent race conditions
@@ -574,7 +560,7 @@ func (s *CrawlService) streamCrawl(ctx context.Context, r engineapi.CrawlCreateR
 				continue
 			}
 
-			res, err := s.scrapeWithOptions(ctx, u, includeHTML, renderJs, fresh, userAgent, waitSelectors)
+			res, err := s.scrapeWithOptions(ctx, u, includeHTML, fresh, userAgent, waitSelectors)
 			if err != nil {
 				mu.Lock()
 				errs[u] = err.Error()
@@ -648,14 +634,14 @@ func (s *CrawlService) streamCrawl(ctx context.Context, r engineapi.CrawlCreateR
 }
 
 // scrapeWithOptions handles scraping with all optional parameters: cache, user agent, and selectors
-func (s *CrawlService) scrapeWithOptions(ctx context.Context, url string, includeHTML, renderJs, fresh bool, userAgent *string, waitSelectors *[]string) (*engineapi.ScrapeResponse, error) {
+func (s *CrawlService) scrapeWithOptions(ctx context.Context, url string, includeHTML, fresh bool, userAgent *string, waitSelectors *[]string) (*engineapi.ScrapeResponse, error) {
 	if fresh {
 		// Bypass cache and scrape fresh
 		format := engineapi.GetV1ScrapeParamsFormat("markdown")
 		if includeHTML {
 			format = engineapi.GetV1ScrapeParamsFormat("html")
 		}
-		params := engineapi.GetV1ScrapeParams{Url: url, Format: &format, RenderJs: &renderJs, Fresh: &fresh, IncludeHtml: &includeHTML}
+		params := engineapi.GetV1ScrapeParams{Url: url, Format: &format, Fresh: &fresh, IncludeHtml: &includeHTML}
 
 		// Set user agent if provided
 		if userAgent != nil && *userAgent != "" {
@@ -671,19 +657,16 @@ func (s *CrawlService) scrapeWithOptions(ctx context.Context, url string, includ
 		return s.scrape.ScrapeURL(ctx, params)
 	} else {
 		// Use cache if available
-		result, _, err := s.scrape.ScrapeWithCache(ctx, url, includeHTML, renderJs)
+		result, _, err := s.scrape.ScrapeWithCache(ctx, url, includeHTML)
 		return result, err
 	}
 }
 
 // getLinks uses the scrape service to extract links from dynamic content with optional user agent and selectors
-func (s *CrawlService) getLinks(ctx context.Context, url string, renderJs bool, userAgent *string, waitSelectors *[]string) []string {
-	// Use scrape service with "links" format to extract all links
-	format := engineapi.GetV1ScrapeParamsFormat("links")
+func (s *CrawlService) getLinks(ctx context.Context, url string, userAgent *string, waitSelectors *[]string) []string {
+	// Use scrape service to extract all links (links are always returned in the response)
 	params := engineapi.GetV1ScrapeParams{
-		Url:      url,
-		Format:   &format,
-		RenderJs: &renderJs,
+		Url:    url,
 	}
 
 	// Set user agent if provided

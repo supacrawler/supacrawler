@@ -34,24 +34,6 @@ func (h *Handler) HandleGetScrape(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(engineapi.Error{Success: &[]bool{false}[0], Error: &[]string{"url is required"}[0]})
 	}
 
-	if p.Format != nil && *p.Format == engineapi.GetV1ScrapeParamsFormat("links") {
-		depth := 0
-		if p.Depth != nil {
-			depth = *p.Depth
-		}
-		maxLinks := 0
-		if p.MaxLinks != nil {
-			maxLinks = *p.MaxLinks
-		}
-		res, err := h.mapper.MapURL(mapper.Request{URL: p.Url, Depth: depth, LinkLimit: maxLinks})
-		if err != nil {
-			errMsg := err.Error()
-			return c.Status(fiber.StatusInternalServerError).JSON(engineapi.Error{Success: &[]bool{false}[0], Error: &errMsg})
-		}
-		discovered := len(res.Links)
-		return c.JSON(engineapi.ScrapeResponse{Success: true, Url: p.Url, Links: res.Links, Discovered: &discovered, Metadata: engineapi.ScrapeMetadata{}})
-	}
-
 	result, err := h.service.ScrapeURL(c.Context(), p)
 	if err != nil {
 		errMsg := err.Error()

@@ -1,0 +1,37 @@
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
+  supacrawler-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    ports:
+      - "8081:8081"
+    environment:
+      - REDIS_ADDR=redis:6379
+      - HTTP_ADDR=:8081
+      - DATA_DIR=/app/data
+      - APP_ENV=development
+    volumes:
+      # Mount source code for hot reload
+      - ./cmd:/app/cmd
+      - ./internal:/app/internal
+      - ./prompts:/app/prompts
+      - ./openapi:/app/openapi
+      - ./.air.toml:/app/.air.toml
+      # Mount data directory for persistence
+      - ./data:/app/data
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+# Optional: Uncomment to add Supabase storage support
+#   environment:
+#     - SUPABASE_URL=http://host.docker.internal:64321
+#     - SUPABASE_SERVICE_KEY=your_service_key
+#     - SUPABASE_STORAGE_BUCKET=screenshots
+

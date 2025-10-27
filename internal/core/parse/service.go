@@ -880,12 +880,10 @@ func (s *Service) streamScrapeContent(ctx context.Context, analysis PromptAnalys
 			continue
 		}
 
-		renderJs := true
 		format := engineapi.GetV1ScrapeParamsFormat("markdown")
 		params := engineapi.GetV1ScrapeParams{
-			Url:      url,
-			Format:   &format,
-			RenderJs: &renderJs,
+			Url:    url,
+			Format: &format,
 		}
 
 		result, err := s.scrapeService.ScrapeURL(ctx, params)
@@ -934,8 +932,6 @@ func (s *Service) streamCrawlContent(ctx context.Context, analysis PromptAnalysi
 		LinkLimit: &analysis.MaxPages,
 	}
 
-	renderJs := true
-	crawlReq.RenderJs = &renderJs
 	if analysis.CrawlConfig != nil {
 		if len(analysis.CrawlConfig.Patterns) > 0 {
 			crawlReq.Patterns = &analysis.CrawlConfig.Patterns
@@ -958,7 +954,7 @@ func (s *Service) streamCrawlContent(ctx context.Context, analysis PromptAnalysi
 		s.log.LogInfof("Using fallback crawl defaults: depth=2, fresh=false")
 	}
 
-	s.log.LogInfof("Crawl request configured: renderJs=true, patterns=%v, depth=%v, fresh=%v, LinkLimit=%v",
+	s.log.LogInfof("Crawl request configured: patterns=%v, depth=%v, fresh=%v, LinkLimit=%v",
 		crawlReq.Patterns, crawlReq.Depth, crawlReq.Fresh, crawlReq.LinkLimit)
 
 	// Create a channel to receive streaming results

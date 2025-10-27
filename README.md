@@ -89,7 +89,6 @@ playwright install chromium --with-deps
 ```
 
 **Without Playwright:** 
-- ❌ `render_js=true` fails with "please install the driver" 
 - ❌ Screenshots fail completely
 - ❌ SPAs return empty content
 
@@ -162,7 +161,35 @@ export DATA_DIR=./data
 air
 ```
 
-### Docker Development
+### Docker Development with Hot Reload
+
+For the best development experience with automatic code reloading:
+
+```bash
+# Start all services with hot reload enabled
+docker compose -f docker-compose.dev.yml up --build
+
+# Or run in detached mode
+docker compose -f docker-compose.dev.yml up --build -d
+
+# View logs
+docker compose -f docker-compose.dev.yml logs -f supacrawler-dev
+
+# Stop services
+docker compose -f docker-compose.dev.yml down
+```
+
+**What you get:**
+- ✅ Automatic code reloading on file changes (via Air)
+- ✅ Source code mounted as volumes
+- ✅ Redis included and configured
+- ✅ No need to rebuild on code changes
+
+**How it works:** The `docker-compose.dev.yml` uses `Dockerfile.dev` which includes Air for hot reloading. Your local source code is mounted into the container, so any changes you make are immediately detected and the server automatically restarts.
+
+### Docker Development (Manual)
+
+For manual Docker builds without hot reload:
 
 ```bash
 # Start Redis
@@ -206,11 +233,8 @@ curl -s http://localhost:8081/internal/health
 
 ### Scraping
 ```bash
-# Markdown format
-curl -s "http://localhost:8081/v1/scrape?url=https://supacrawler.com&format=markdown"
-
-# Links mapping
-curl -s "http://localhost:8081/v1/scrape?url=https://supacrawler.com&format=links&depth=2&max_links=10&include_subdomains=true"
+# Scrape page (markdown format, links always included)
+curl -s "http://localhost:8081/v1/scrape?url=https://supacrawler.com"
 ```
 
 ### Crawling
@@ -225,7 +249,6 @@ curl -s -X POST http://localhost:8081/v1/crawl \
     "depth": 2,
     "link_limit": 20,
     "include_subdomains": true,
-    "render_js": false,
     "include_html": false
   }'
 

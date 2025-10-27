@@ -3,9 +3,7 @@ package scrape
 import (
 	"context"
 	"fmt"
-	"io"
 	"math/rand"
-	"net/http"
 	"regexp"
 	"strings"
 	"sync"
@@ -22,33 +20,26 @@ import (
 )
 
 type Service struct {
-	log        *logger.Logger
-	redis      *rds.Service
-	httpClient *http.Client
-	robots     *robots.Service
+	log    *logger.Logger
+	redis  *rds.Service
+	robots *robots.Service
 }
 
 func NewScrapeService(redis *rds.Service) *Service {
-	return &Service{log: logger.New("ScrapeService"), redis: redis, httpClient: newHTTPClient(), robots: robots.New()}
+	return &Service{log: logger.New("ScrapeService"), redis: redis, robots: robots.New()}
 }
 
 // ScrapeWithCache parity helper used by crawl: returns (result, cached, error)
-func (s *Service) ScrapeWithCache(ctx context.Context, url string, includeHTML, renderJs bool) (*engineapi.ScrapeResponse, bool, error) {
+func (s *Service) ScrapeWithCache(ctx context.Context, url string, includeHTML bool) (*engineapi.ScrapeResponse, bool, error) {
 	format := engineapi.GetV1ScrapeParamsFormat("markdown")
-	params := engineapi.GetV1ScrapeParams{Url: url, Format: &format, RenderJs: &renderJs, IncludeHtml: &includeHTML}
+	params := engineapi.GetV1ScrapeParams{Url: url, Format: &format, IncludeHtml: &includeHTML}
 
 	if cached := s.getCached(ctx, params); cached != nil {
-		s.log.LogDebugf("scrapeWithCache hit url=%s", url)
+		s.log.Info().Str("url", url).Msg("cache hit")
 		return cached, true, nil
 	}
 
-	var res *engineapi.ScrapeResponse
-	var err error
-	if renderJs {
-		res, err = s.scrapeWithPlaywright(params)
-	} else {
-		res, err = s.scrapeSimpleHTTP(params)
-	}
+	res, err := s.scrapeWithRetriesPlaywright(params)
 	if err != nil {
 		return nil, false, err
 	}
@@ -63,7 +54,7 @@ func (s *Service) ScrapeWithCache(ctx context.Context, url string, includeHTML, 
 
 // ScrapeURL implements synchronous scrape with caching, robots checks, and scraping
 func (s *Service) ScrapeURL(ctx context.Context, params engineapi.GetV1ScrapeParams) (*engineapi.ScrapeResponse, error) {
-	s.log.LogDebugf("scrape start url=%s render_js=%v", params.Url, boolVal(params.RenderJs))
+	s.log.Info().Str("url", params.Url).Msg("scrape start")
 	fresh := false
 	if params.Fresh != nil {
 		fresh = *params.Fresh
@@ -72,164 +63,62 @@ func (s *Service) ScrapeURL(ctx context.Context, params engineapi.GetV1ScrapePar
 	// Cache read
 	if !fresh {
 		if cached := s.getCached(ctx, params); cached != nil {
-			s.log.LogDebugf("cache hit url=%s", params.Url)
+			s.log.Info().Str("url", params.Url).Msg("cache hit")
 			return cached, nil
 		}
-		s.log.LogDebugf("cache miss url=%s", params.Url)
 	}
 
 	// Respect robots.txt
 	if !s.robots.IsAllowed(params.Url, "SupacrawlerBot") {
-		s.log.LogWarnf("robots disallow url=%s", params.Url)
+		s.log.Info().Str("url", params.Url).Msg("robots disallow")
 		return nil, fmt.Errorf("disallowed by robots.txt")
 	}
 
-	// Use Playwright if renderJs is explicitly enabled, otherwise use simple HTTP
-	usePlaywright := false
-	if params.RenderJs != nil && *params.RenderJs {
-		usePlaywright = true
-	}
-
-	var result *engineapi.ScrapeResponse
-	var err error
-
-	// Simple scrape - no retry logic
-	if usePlaywright {
-		result, err = s.scrapeWithPlaywright(params)
-	} else {
-		result, err = s.scrapeSimpleHTTP(params)
-	}
-
+	// Always use Playwright with retry logic
+	result, err := s.scrapeWithRetriesPlaywright(params)
 	if err != nil {
-		s.log.LogErrorf("scrape failed url=%s err=%v", params.Url, err)
+		s.log.Info().Str("url", params.Url).Str("error", err.Error()).Msg("scrape failed")
 		return nil, err
 	}
 
 	// Success! Cache and return
 	s.cache(ctx, params, result)
-	contentPreview := ""
-	if result.Content != nil {
-		contentPreview = *result.Content
-		if len(contentPreview) > 100 {
-			contentPreview = contentPreview[:100] + "..."
-		}
-	}
-	s.log.LogSuccessf("scrape ok url=%s status=%d method=%s output=%s",
-		params.Url, intVal(result.Metadata.StatusCode),
-		map[bool]string{true: "playwright", false: "http"}[usePlaywright],
-		contentPreview)
+	s.log.Info().Str("url", params.Url).Int("status", intVal(result.Metadata.StatusCode)).Str("method", "playwright").Msg("scrape complete")
 	return result, nil
 }
 
-// scrapeSimpleHTTP provides basic HTTP scraping using parameters from backend
-func (s *Service) scrapeSimpleHTTP(params engineapi.GetV1ScrapeParams) (*engineapi.ScrapeResponse, error) {
-	// Use parameters passed from backend
-	req, err := http.NewRequest("GET", params.Url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
+// scrapeWithRetriesPlaywright attempts scrape with 3 different strategies
+func (s *Service) scrapeWithRetriesPlaywright(params engineapi.GetV1ScrapeParams) (*engineapi.ScrapeResponse, error) {
+	strategies := GetAllStrategies()
+	var lastErr error
 
-	// Use user agent from backend or default
-	userAgent := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-	if params.UserAgent != nil && *params.UserAgent != "" {
-		userAgent = *params.UserAgent
-		s.log.LogDebugf("Using user agent from backend: %s", userAgent)
-	}
+	for i, strategy := range strategies {
+		s.log.Info().Str("url", params.Url).Int("attempt", i+1).Str("strategy", string(strategy)).Msg("attempt playwright scrape")
 
-	req.Header.Set("User-Agent", userAgent)
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-	req.Header.Set("DNT", "1")
-	req.Header.Set("Connection", "keep-alive")
-	req.Header.Set("Upgrade-Insecure-Requests", "1")
-
-	// Log proxy settings (actual proxy setup would be handled differently)
-	if params.ProxyMode != nil && *params.ProxyMode != "off" {
-		s.log.LogDebugf("Proxy mode '%s' requested for URL: %s", *params.ProxyMode, params.Url)
-		if params.ProxyRegion != nil {
-			s.log.LogDebugf("Proxy region: %s", *params.ProxyRegion)
+		result, err := s.scrapeWithPlaywright(params, strategy)
+		if err == nil && !s.isCloudflareBlocked(result) {
+			s.log.Info().Str("url", params.Url).Str("strategy", string(strategy)).Msg("playwright scrape succeeded")
+			return result, nil
 		}
-		if params.ProxySession != nil {
-			s.log.LogDebugf("Proxy session: %s", *params.ProxySession)
+
+		if err != nil {
+			lastErr = err
+			s.log.Info().Str("url", params.Url).Str("strategy", string(strategy)).Str("error", err.Error()).Msg("playwright scrape attempt failed")
+		} else {
+			lastErr = fmt.Errorf("cloudflare challenge detected")
+			s.log.Info().Str("url", params.Url).Str("strategy", string(strategy)).Int("status", intVal(result.Metadata.StatusCode)).Msg("cloudflare detected")
+		}
+
+		// Longer delay between Playwright retries
+		if i < len(strategies)-1 {
+			time.Sleep(time.Duration(2000+rand.Intn(2000)) * time.Millisecond)
 		}
 	}
 
-	// Add random delay to avoid rate limiting (1-3 seconds)
-	delay := time.Duration(rand.Intn(2000)+1000) * time.Millisecond
-	s.log.LogDebugf("Adding %v delay before request to %s", delay, params.Url)
-	time.Sleep(delay)
-
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("fetch: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("status %d", resp.StatusCode)
-	}
-
-	htmlBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	h := string(htmlBytes)
-	md := s.convertHTMLToMarkdown(h)
-
-	var content string
-
-	format := engineapi.GetV1ScrapeParamsFormat("markdown")
-	if params.Format != nil {
-		format = *params.Format
-	}
-
-	includeHTML := false
-	if params.IncludeHtml != nil {
-		includeHTML = *params.IncludeHtml
-	}
-
-	// Handle different formats
-	if format == engineapi.GetV1ScrapeParamsFormat("links") {
-		// Extract links from HTML
-		links := extractLinksFromHTML(h, params.Url)
-		content = strings.Join(links, "\n")
-	} else {
-		// Default to markdown
-		content = s.cleanContent(md)
-		if !strings.HasSuffix(content, "\n\n") {
-			content = strings.TrimRight(content, "\n") + "\n\n"
-		}
-	}
-
-	title := extractTitle(h)
-	// Build rich metadata from the HTML
-	meta := buildMetadataFromHTML(h, params.Url, resp.StatusCode)
-
-	// Always extract and include links
-	links := extractLinksFromHTML(h, params.Url)
-	discovered := len(links)
-
-	result := &engineapi.ScrapeResponse{
-		Success:    true,
-		Url:        params.Url,
-		Content:    &content,
-		Title:      &title,
-		Links:      links,
-		Discovered: &discovered,
-		Metadata:   meta,
-	}
-
-	// Include HTML if requested
-	if includeHTML {
-		htmlContent := strings.TrimSpace(h)
-		result.Html = &htmlContent
-	}
-
-	return result, nil
+	return nil, fmt.Errorf("all strategies exhausted: %w", lastErr)
 }
 
-func (s *Service) scrapeWithPlaywright(params engineapi.GetV1ScrapeParams) (*engineapi.ScrapeResponse, error) {
-	s.log.LogDebugf("scrapeWithPlaywright start url=%s", params.Url)
+func (s *Service) scrapeWithPlaywright(params engineapi.GetV1ScrapeParams, strategy HeaderStrategy) (*engineapi.ScrapeResponse, error) {
 
 	pw, err := playwright.Run()
 	if err != nil {
@@ -255,28 +144,41 @@ func (s *Service) scrapeWithPlaywright(params engineapi.GetV1ScrapeParams) (*eng
 	defer pw.Stop()
 	defer browser.Close()
 
-	// Use user agent from backend or default
-	userAgent := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+	// Get header profile for strategy
+	profile := GetHeaderProfile(strategy)
+
+	// Override with user-provided agent if available
+	userAgent := profile.UserAgent
 	if params.UserAgent != nil && *params.UserAgent != "" {
 		userAgent = *params.UserAgent
-		s.log.LogDebugf("Using user agent from backend: %s", userAgent)
 	}
 
-	// Log proxy settings (actual proxy setup would be handled in browser context)
-	if params.ProxyMode != nil && *params.ProxyMode != "off" {
-		s.log.LogDebugf("Proxy mode '%s' requested for Playwright: %s", *params.ProxyMode, params.Url)
+	// Build headers from profile
+	headers := map[string]string{
+		"Accept":                    profile.Accept,
+		"Accept-Language":           profile.AcceptLanguage,
+		"Accept-Encoding":           profile.AcceptEncoding,
+		"Upgrade-Insecure-Requests": "1",
+	}
+
+	if profile.SecFetchDest != "" {
+		headers["Sec-Fetch-Dest"] = profile.SecFetchDest
+		headers["Sec-Fetch-Mode"] = profile.SecFetchMode
+		headers["Sec-Fetch-Site"] = profile.SecFetchSite
+		if profile.SecFetchUser != "" {
+			headers["Sec-Fetch-User"] = profile.SecFetchUser
+		}
+	}
+
+	if profile.SecChUa != "" {
+		headers["Sec-Ch-Ua"] = profile.SecChUa
+		headers["Sec-Ch-Ua-Mobile"] = profile.SecChUaMobile
+		headers["Sec-Ch-Ua-Platform"] = profile.SecChUaPlatform
 	}
 
 	ctx, err := browser.NewContext(playwright.BrowserNewContextOptions{
-		UserAgent: playwright.String(userAgent),
-		ExtraHttpHeaders: map[string]string{
-			"Accept":                    "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-			"Accept-Language":           "en-US,en;q=0.9",
-			"Accept-Encoding":           "gzip, deflate, br",
-			"DNT":                       "1",
-			"Connection":                "keep-alive",
-			"Upgrade-Insecure-Requests": "1",
-		},
+		UserAgent:        playwright.String(userAgent),
+		ExtraHttpHeaders: headers,
 	})
 	if err != nil {
 		return nil, err
@@ -285,30 +187,6 @@ func (s *Service) scrapeWithPlaywright(params engineapi.GetV1ScrapeParams) (*eng
 	if err != nil {
 		return nil, err
 	}
-
-	// Add stealth scripts to avoid detection
-	stealthScript := `
-		// Remove webdriver property
-		Object.defineProperty(navigator, 'webdriver', {
-			get: () => undefined,
-		});
-		
-		// Remove automation indicators
-		delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array;
-		delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise;
-		delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol;
-		
-		// Override permissions
-		const originalQuery = window.navigator.permissions.query;
-		window.navigator.permissions.query = (parameters) => (
-			parameters.name === 'notifications' ?
-				Promise.resolve({ state: Notification.permission }) :
-				originalQuery(parameters)
-		);
-	`
-	page.AddInitScript(playwright.Script{Content: playwright.String(stealthScript)})
-
-	s.log.LogDebugf("Using Playwright with User-Agent: %s", userAgent)
 
 	var resp playwright.Response
 	resp, navErr := page.Goto(params.Url, playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateDomcontentloaded, Timeout: playwright.Float(10000)})
@@ -351,18 +229,11 @@ func (s *Service) scrapeWithPlaywright(params engineapi.GetV1ScrapeParams) (*eng
 		includeHTML = *params.IncludeHtml
 	}
 
-	// Handle different formats
-	if format == engineapi.GetV1ScrapeParamsFormat("links") {
-		// Extract links from HTML
-		links := extractLinksFromHTML(content, params.Url)
-		out = strings.Join(links, "\n")
-	} else {
-		// Default to markdown
-		out = s.cleanContent(md)
-		if !strings.HasSuffix(out, "\n\n") {
-			// ensure exactly two newlines at end
-			out = strings.TrimRight(out, "\n") + "\n\n"
-		}
+	// Always use markdown format
+	out = s.cleanContent(md)
+	if !strings.HasSuffix(out, "\n\n") {
+		// ensure exactly two newlines at end
+		out = strings.TrimRight(out, "\n") + "\n\n"
 	}
 
 	status := 200
@@ -371,8 +242,12 @@ func (s *Service) scrapeWithPlaywright(params engineapi.GetV1ScrapeParams) (*eng
 	}
 	meta := buildMetadataFromHTML(content, params.Url, status)
 
-	// Always extract and include links
-	links := extractLinksFromHTML(content, params.Url)
+    // Always extract and include links
+    // Prefer extracting from the live DOM (after JS) and fall back to HTML regex
+    links := s.extractLinksFromDOM(page)
+    if len(links) == 0 {
+        links = extractLinksFromHTML(content, params.Url)
+    }
 	discovered := len(links)
 
 	result := &engineapi.ScrapeResponse{
@@ -392,16 +267,6 @@ func (s *Service) scrapeWithPlaywright(params engineapi.GetV1ScrapeParams) (*eng
 	}
 
 	return result, nil
-}
-
-func newHTTPClient() *http.Client {
-	transport := &http.Transport{
-		MaxIdleConns:      100,
-		IdleConnTimeout:   90 * time.Second,
-		MaxConnsPerHost:   10, // Limit concurrent connections per host
-		DisableKeepAlives: false,
-	}
-	return &http.Client{Transport: transport, Timeout: 10 * time.Second}
 }
 
 func (s *Service) convertHTMLToMarkdown(h string) string {
@@ -525,6 +390,53 @@ func extractLinksFromHTML(htmlContent, baseURL string) []string {
 	}
 
 	return uniqueLinks
+}
+
+// extractLinksFromDOM extracts links from the rendered DOM using Playwright
+func (s *Service) extractLinksFromDOM(page playwright.Page) []string {
+    if page == nil {
+        return nil
+    }
+    result, err := page.Evaluate(`() => {
+        const anchors = Array.from(document.querySelectorAll('a[href]'));
+        const out = new Set();
+        const absolutize = (href) => {
+            try {
+                return new URL(href, document.baseURI).toString();
+            } catch (_) { return null; }
+        };
+        for (const a of anchors) {
+            const href = a.getAttribute('href') || '';
+            if (!href) continue;
+            if (href.startsWith('javascript:') || href.startsWith('mailto:') || href.startsWith('#')) continue;
+            const abs = absolutize(href);
+            if (abs && (abs.startsWith('http://') || abs.startsWith('https://'))) out.add(abs);
+        }
+        return Array.from(out);
+    }`)
+    if err != nil {
+        return nil
+    }
+    arr, ok := result.([]interface{})
+    if !ok || len(arr) == 0 {
+        return nil
+    }
+    links := make([]string, 0, len(arr))
+    for _, v := range arr {
+        if s, ok := v.(string); ok && s != "" {
+            links = append(links, s)
+        }
+    }
+    // dedupe
+    seen := make(map[string]bool)
+    uniq := make([]string, 0, len(links))
+    for _, l := range links {
+        if !seen[l] {
+            seen[l] = true
+            uniq = append(uniq, l)
+        }
+    }
+    return uniq
 }
 
 // extractPageMetadataFromHTML parses common metadata from an HTML string into a flat map
@@ -679,23 +591,12 @@ func (s *Service) getCached(ctx context.Context, params engineapi.GetV1ScrapePar
 
 func (s *Service) cache(ctx context.Context, params engineapi.GetV1ScrapeParams, res *engineapi.ScrapeResponse) {
 	key := s.generateCacheKey(params)
-	// TTL: longer for render_js
-	renderJs := false
-	if params.RenderJs != nil {
-		renderJs = *params.RenderJs
-	}
-	ttl := 300 // 5 minutes
-	if renderJs {
-		ttl = 900 // 15 minutes
-	}
+	// TTL: 15 minutes for all Playwright scrapes
+	ttl := 900
 	_ = s.redis.CacheSet(ctx, key, res, ttl)
 }
 
 func (s *Service) generateCacheKey(params engineapi.GetV1ScrapeParams) string {
-	render := "false"
-	if params.RenderJs != nil && *params.RenderJs {
-		render = "true"
-	}
 	format := "markdown"
 	if params.Format != nil {
 		format = string(*params.Format)
@@ -709,7 +610,7 @@ func (s *Service) generateCacheKey(params engineapi.GetV1ScrapeParams) string {
 	safeURL = strings.ReplaceAll(safeURL, "/", "_")
 	safeURL = strings.ReplaceAll(safeURL, "?", "_")
 	safeURL = strings.ReplaceAll(safeURL, "&", "_")
-	return fmt.Sprintf("scrape:%s:%s:%s:%s", safeURL, render, format, includeHtml)
+	return fmt.Sprintf("scrape:%s:%s:%s", safeURL, format, includeHtml)
 }
 
 // Retry classification
@@ -1170,4 +1071,37 @@ func (s *Service) hasSignificantContentChange(initial, final *ContentSignature, 
 	}
 
 	return hasChange
+}
+
+// isCloudflareBlocked detects if the response is a Cloudflare challenge page
+func (s *Service) isCloudflareBlocked(result *engineapi.ScrapeResponse) bool {
+	if result == nil {
+		return false
+	}
+
+	// Check status code
+	if result.Metadata.StatusCode != nil && *result.Metadata.StatusCode == 403 {
+		// Check title for Cloudflare indicators
+		if result.Title != nil {
+			title := *result.Title
+			if strings.Contains(title, "Just a moment") ||
+				strings.Contains(title, "Checking your browser") ||
+				strings.Contains(title, "Attention Required") {
+				return true
+			}
+		}
+
+		// Check content for Cloudflare indicators
+		if result.Content != nil {
+			content := *result.Content
+			if strings.Contains(content, "Waiting for") && strings.Contains(content, "to respond") {
+				return true
+			}
+			if strings.Contains(content, "Cloudflare") && strings.Contains(content, "Ray ID") {
+				return true
+			}
+		}
+	}
+
+	return false
 }
